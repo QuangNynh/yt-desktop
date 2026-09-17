@@ -8,6 +8,9 @@ app.commandLine.appendSwitch('disable-features', 'AutofillServerCommunication,Au
 // Thiết lập đường dẫn lưu trữ vào UserData của Electron
 process.env.USER_DATA_PATH = app.getPath('userData');
 
+// Đảm bảo chỉ có một instance duy nhất chạy (Single Instance Lock)
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+
 let mainWindow: BrowserWindow | null = null;
 let backendServer: Server | null = null;
 
@@ -16,7 +19,15 @@ function focusMainWindow(callbackUrl?: string) {
   if (mainWindow) {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
+
+    // Trên Windows, toggle alwaysOnTop để đưa app lên trước các cửa sổ trình duyệt khác
+    mainWindow.setAlwaysOnTop(true);
     mainWindow.focus();
+    mainWindow.setAlwaysOnTop(false);
+
+    try {
+      mainWindow.webContents.send('app-focused', callbackUrl);
+    } catch {}
 
     if (callbackUrl && callbackUrl.includes('code=')) {
       try {
@@ -35,6 +46,11 @@ function focusMainWindow(callbackUrl?: string) {
 // IPC Handler để backend hoặc frontend yêu cầu focus app
 ipcMain.handle('focus-app', () => {
   focusMainWindow();
+});
+
+// IPC Handler mở browser ngoài
+ipcMain.handle('open-external', async (_, url: string) => {
+  await shell.openExternal(url);
 });
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
@@ -100,67 +116,69 @@ function createWindow() {
   });
 }
 
-app.whenReady().then(async () => {
-  await startBackend();
-  createWindow();
-
-  // Đăng ký listener lắng nghe khi có kênh kết nối thành công từ backend
-  try {
-    const routes = isDev ? require('../backend/src/routes') : require('../dist-backend/routes');
-    if (routes.setAuthSuccessListener) {
-      routes.setAuthSuccessListener((title: string) => {
-        console.log(`[Electron] Channel "${title}" connected! Focusing desktop window...`);
-        focusMainWindow();
-      });
+if (!gotSingleInstanceLock) {
+  // Có một instance khác đang chạy. Thoát ngay lập tức để không khởi động lại backend server
+  console.log('[Electron] Another instance is already running. Quitting duplicate instance immediately.');
+  app.quit();
+} else {
+  // Đăng ký custom protocol để browser có thể gọi mở lại Desktop App
+  if (process.defaultApp) {
+    if (process.argv.length >= 2) {
+      app.setAsDefaultProtocolClient('youtubescheduler', process.execPath, [
+        path.resolve(process.argv[1]),
+      ]);
     }
-  } catch (e) {
-    // ignore
+  } else {
+    app.setAsDefaultProtocolClient('youtubescheduler');
   }
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
+  // Xử lý khi click vào link youtubescheduler:// trên macOS
+  app.on('open-url', (event, url) => {
+    event.preventDefault();
+    focusMainWindow(url);
+  });
+
+  // Xử lý instance thứ hai trên Windows/Linux (khi người dùng click link giao thức youtubescheduler://)
+  app.on('second-instance', (_, commandLine) => {
+    console.log('[Electron] Second instance opened with args:', commandLine);
+    const customUrl = commandLine.find((arg) => arg.startsWith('youtubescheduler://'));
+    focusMainWindow(customUrl);
+  });
+
+  app.whenReady().then(async () => {
+    await startBackend();
+    createWindow();
+
+    // Đăng ký listener lắng nghe khi có kênh kết nối thành công từ backend
+    try {
+      const routes = isDev ? require('../backend/src/routes') : require('../dist-backend/routes');
+      if (routes.setAuthSuccessListener) {
+        routes.setAuthSuccessListener((title: string) => {
+          console.log(`[Electron] Channel "${title}" connected! Focusing desktop window...`);
+          focusMainWindow();
+        });
+      }
+    } catch (e) {
+      // ignore
+    }
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        createWindow();
+      }
+    });
+  });
+
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') {
+      app.quit();
     }
   });
-});
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
-});
-
-app.on('before-quit', () => {
-  if (backendServer) {
-    console.log('[Electron] Shutting down backend server...');
-    backendServer.close();
-  }
-});
-
-// IPC Handler mở browser ngoài
-ipcMain.handle('open-external', async (_, url: string) => {
-  await shell.openExternal(url);
-});
-
-// Đăng ký custom protocol để browser có thể gọi mở lại Desktop App
-if (process.defaultApp) {
-  if (process.argv.length >= 2) {
-    app.setAsDefaultProtocolClient('youtubescheduler', process.execPath, [
-      path.resolve(process.argv[1]),
-    ]);
-  }
-} else {
-  app.setAsDefaultProtocolClient('youtubescheduler');
+  app.on('before-quit', () => {
+    if (backendServer) {
+      console.log('[Electron] Shutting down backend server...');
+      backendServer.close();
+    }
+  });
 }
-
-// Xử lý khi click vào link youtubescheduler:// trên macOS
-app.on('open-url', (event, url) => {
-  event.preventDefault();
-  focusMainWindow(url);
-});
-
-// Xử lý instance thứ hai trên Windows/Linux
-app.on('second-instance', (_, commandLine) => {
-  const customUrl = commandLine.find((arg) => arg.startsWith('youtubescheduler://'));
-  focusMainWindow(customUrl);
-});

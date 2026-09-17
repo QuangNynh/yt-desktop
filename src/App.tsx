@@ -27,13 +27,13 @@ export function App() {
             // Kích hoạt giao thức mở và focus ứng dụng Desktop
             try {
               window.location.href = "youtubescheduler://focus";
-            } catch (e) {}
+            } catch (e) { }
 
             // Tự đóng tab nếu chạy trong trình duyệt web ngoài
             setTimeout(() => {
               try {
                 window.close();
-              } catch (e) {}
+              } catch (e) { }
             }, 1200);
 
             // Dọn sạch URL query và đưa về trang chủ

@@ -18,11 +18,12 @@ export default defineConfig({
         target: 'http://localhost:8695',
         changeOrigin: true,
       },
-      '/youtube': {
+      '/youtube/callback': {
         target: 'http://localhost:8695',
         changeOrigin: true,
       },
     },
+    
   },
   build: {
     outDir: 'dist',

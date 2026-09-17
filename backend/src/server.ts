@@ -38,6 +38,14 @@ export function startServer(port?: number) {
     console.log(`[Backend] YouTube Scheduler Server running on http://localhost:${listenPort}/api/v1`);
   });
 
+  server.on('error', (err: any) => {
+    if (err.code === 'EADDRINUSE') {
+      console.warn(`[Backend] Port ${listenPort} is already in use. Assuming existing backend server is running.`);
+    } else {
+      console.error(`[Backend] Server error:`, err);
+    }
+  });
+
   // Lắng nghe thêm trên các cổng phụ cũ (8000, 1111) nếu còn trống để hỗ trợ callback cũ
   [8000, 1111].forEach((secPort) => {
     try {

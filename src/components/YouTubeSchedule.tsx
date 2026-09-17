@@ -407,6 +407,18 @@ export const YouTubeSchedule = () => {
 
   useEffect(() => {
     fetchConnectedChannels();
+
+    const onFocus = () => {
+      fetchConnectedChannels();
+    };
+
+    window.addEventListener('focus', onFocus);
+    if ((window as any).electronAPI?.onAppFocused) {
+      (window as any).electronAPI.onAppFocused(onFocus);
+    }
+    return () => {
+      window.removeEventListener('focus', onFocus);
+    };
   }, []);
 
   const fetchChannelVideos = async (

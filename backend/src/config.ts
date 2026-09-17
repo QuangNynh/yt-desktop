@@ -11,10 +11,18 @@ const envCandidates = [
   process.env.USER_DATA_PATH ? path.join(process.env.USER_DATA_PATH, '.env') : '',
 ].filter(Boolean);
 
+// Lưu lại PORT truyền từ CLI (ví dụ cross-env PORT=8695 trong npm run dev:backend)
+const cliPort = process.env.PORT;
+
 for (const envPath of envCandidates) {
   if (fs.existsSync(envPath)) {
     dotenv.config({ path: envPath, override: true });
   }
+}
+
+// Khôi phục PORT từ CLI nếu có, để dev mode chạy đúng cổng backend nội bộ 8695
+if (cliPort) {
+  process.env.PORT = cliPort;
 }
 
 // Hỗ trợ thư mục userData từ Electron khi chạy đóng gói hoặc dev
