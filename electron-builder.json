@@ -9,6 +9,8 @@
     "dist-backend/**/*",
     "dist-electron/**/*",
     "build/icon.png",
+    ".env",
+    "data/**/*",
     "node_modules/**/*",
     "package.json"
   ],

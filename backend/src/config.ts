@@ -3,6 +3,19 @@ import fs from 'fs';
 import dotenv from 'dotenv';
 
 dotenv.config();
+const envCandidates = [
+  path.join(process.cwd(), '.env'),
+  path.join(__dirname, '../../.env'),
+  path.join(__dirname, '../.env'),
+  (process as any).resourcesPath ? path.join((process as any).resourcesPath, '.env') : '',
+  process.env.USER_DATA_PATH ? path.join(process.env.USER_DATA_PATH, '.env') : '',
+].filter(Boolean);
+
+for (const envPath of envCandidates) {
+  if (fs.existsSync(envPath)) {
+    dotenv.config({ path: envPath, override: true });
+  }
+}
 
 // Hỗ trợ thư mục userData từ Electron khi chạy đóng gói hoặc dev
 export const DATA_DIR = process.env.USER_DATA_PATH
@@ -58,15 +71,12 @@ export function loadSettings(): AppSettings {
 
   return {
     googleClientId:
-      settings.googleClientId ||
       process.env.GOOGLE_CLIENT_ID ||
-      '930038299571-a7ddfgn1r3vc9ljl8si6fqbr3v3ovsfh.apps.googleusercontent.com',
+      '',
     googleClientSecret:
-      settings.googleClientSecret ||
       process.env.GOOGLE_CLIENT_SECRET ||
       '',
     redirectUri:
-      settings.redirectUri ||
       process.env.GOOGLE_REDIRECT_URI ||
       'http://localhost:8696/api/v1/youtube/callback',
     port: Number(process.env.PORT || settings.port || 8696),
