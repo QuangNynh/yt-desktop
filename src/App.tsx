@@ -92,7 +92,7 @@ export function App() {
           </div>
 
           <div className="flex items-center gap-2">
-            <Button
+            {/* <Button
               variant="outline"
               size="sm"
               onClick={() => setSettingsOpen(true)}
@@ -100,7 +100,7 @@ export function App() {
             >
               <Settings className="h-3.5 w-3.5" />
               <span>Cài đặt API</span>
-            </Button>
+            </Button> */}
 
             <Button
               variant="ghost"
