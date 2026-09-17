@@ -1,0 +1,10 @@
+node_modules
+dist
+dist-backend
+dist-electron
+release
+data/uploads/*
+data/youtube-channels.json
+data/settings.json
+.env
+.DS_Store
