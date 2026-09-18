@@ -3,6 +3,10 @@ import multer from 'multer';
 import path from 'path';
 import { UPLOADS_DIR, loadSettings, saveSettings } from './config';
 import { youtubeService } from './youtube.service';
+import { youtubeToolsService } from './youtube-tools.service';
+import { instagramService } from './instagram.service';
+import { tiktokService } from './tiktok.service';
+import { pinterestService } from './pinterest.service';
 
 const upload = multer({
   dest: UPLOADS_DIR,
@@ -282,5 +286,270 @@ apiRouter.post('/youtube/thumbnail', upload.single('file'), async (req: Request,
     res.json(result);
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// =================== YouTube Tools (Transcript, Audio, Video, URLs) ===================
+apiRouter.post('/youtube/transcript', async (req: Request, res: Response) => {
+  try {
+    const { url } = req.body;
+    if (!url) return res.status(400).json({ success: false, message: 'Missing url' });
+    const result = await youtubeToolsService.getTranscript(url);
+    res.json(result);
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.post('/youtube/audio', async (req: Request, res: Response) => {
+  try {
+    const { url } = req.body;
+    if (!url) return res.status(400).json({ success: false, message: 'Missing url' });
+    await youtubeToolsService.streamAudio(url, res);
+  } catch (error: any) {
+    if (!res.headersSent) res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.post('/youtube/video', async (req: Request, res: Response) => {
+  try {
+    const { url, quality } = req.body;
+    if (!url) return res.status(400).json({ success: false, message: 'Missing url' });
+    await youtubeToolsService.streamVideo(url, res, quality);
+  } catch (error: any) {
+    if (!res.headersSent) res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.post('/youtube/urls', async (req: Request, res: Response) => {
+  try {
+    const { url } = req.body;
+    if (!url) return res.status(400).json({ success: false, message: 'Missing url' });
+    const result = await youtubeToolsService.getChannelVideos(url);
+    res.json(result);
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// =================== Instagram API ===================
+apiRouter.post('/instagram/info', async (req: Request, res: Response) => {
+  try {
+    const { url } = req.body;
+    if (!url) return res.status(400).json({ success: false, message: 'Missing url' });
+    const result = await instagramService.getVideoInfo(url);
+    res.json(result);
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.post('/instagram/video', async (req: Request, res: Response) => {
+  try {
+    const { url } = req.body;
+    if (!url) return res.status(400).json({ success: false, message: 'Missing url' });
+    await instagramService.downloadVideo(url, res);
+  } catch (error: any) {
+    if (!res.headersSent) res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.post('/instagram/audio', async (req: Request, res: Response) => {
+  try {
+    const { url } = req.body;
+    if (!url) return res.status(400).json({ success: false, message: 'Missing url' });
+    await instagramService.downloadAudio(url, res);
+  } catch (error: any) {
+    if (!res.headersSent) res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.post('/instagram/channel', async (req: Request, res: Response) => {
+  try {
+    const { url, type, page, pageSize } = req.body;
+    if (!url) return res.status(400).json({ success: false, message: 'Missing url' });
+    const result = await instagramService.getChannelVideos(url, type, page, pageSize);
+    res.json(result);
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.post('/instagram/channel/export', async (req: Request, res: Response) => {
+  try {
+    const { url, type } = req.body;
+    if (!url) return res.status(400).json({ success: false, message: 'Missing url' });
+    await instagramService.exportChannelVideosToExcel(url, res, type);
+  } catch (error: any) {
+    if (!res.headersSent) res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.post('/instagram/channel/export-images', async (req: Request, res: Response) => {
+  try {
+    const { url, type } = req.body;
+    if (!url) return res.status(400).json({ success: false, message: 'Missing url' });
+    await instagramService.exportChannelImagesToZip(url, res, type);
+  } catch (error: any) {
+    if (!res.headersSent) res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.post('/instagram/channel/clear-cache', async (req: Request, res: Response) => {
+  try {
+    const result = await instagramService.clearAllChannelCache();
+    res.json(result);
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// =================== TikTok API ===================
+apiRouter.post('/tiktok/channel-videos', async (req: Request, res: Response) => {
+  try {
+    const { url, limit } = req.body;
+    if (!url) return res.status(400).json({ success: false, message: 'Missing url' });
+    const result = await tiktokService.getChannelVideos(url, limit);
+    res.json(result);
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.post('/tiktok/video', async (req: Request, res: Response) => {
+  try {
+    const { url } = req.body;
+    if (!url) return res.status(400).json({ success: false, message: 'Missing url' });
+    await tiktokService.downloadVideo(url, res);
+  } catch (error: any) {
+    if (!res.headersSent) res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.post('/tiktok/audio', async (req: Request, res: Response) => {
+  try {
+    const { url } = req.body;
+    if (!url) return res.status(400).json({ success: false, message: 'Missing url' });
+    await tiktokService.downloadAudio(url, res);
+  } catch (error: any) {
+    if (!res.headersSent) res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// =================== Pinterest API ===================
+apiRouter.post('/pinterest/channel', async (req: Request, res: Response) => {
+  try {
+    const { url, type, page, pageSize } = req.body;
+    if (!url) return res.status(400).json({ success: false, message: 'Missing url' });
+    const result = await pinterestService.getChannelPins(url, type, page, pageSize);
+    res.json(result);
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.post('/pinterest/channel/export', async (req: Request, res: Response) => {
+  try {
+    const { url, type } = req.body;
+    if (!url) return res.status(400).json({ success: false, message: 'Missing url' });
+    await pinterestService.exportChannelToExcel(url, res, type);
+  } catch (error: any) {
+    if (!res.headersSent) res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.post('/pinterest/channel/export-images', async (req: Request, res: Response) => {
+  try {
+    const { url, type } = req.body;
+    if (!url) return res.status(400).json({ success: false, message: 'Missing url' });
+    await pinterestService.exportImagesToZip(url, res, type);
+  } catch (error: any) {
+    if (!res.headersSent) res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.post('/pinterest/channel/clear-cache', async (req: Request, res: Response) => {
+  try {
+    const result = await pinterestService.clearAllCache();
+    res.json(result);
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.post('/pinterest/video', async (req: Request, res: Response) => {
+  try {
+    const { url } = req.body;
+    if (!url) return res.status(400).json({ success: false, message: 'Missing url' });
+    await pinterestService.downloadVideo(url, res);
+  } catch (error: any) {
+    if (!res.headersSent) res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.post('/pinterest/image', async (req: Request, res: Response) => {
+  try {
+    const { url } = req.body;
+    if (!url) return res.status(400).json({ success: false, message: 'Missing url' });
+    await pinterestService.downloadImage(url, res);
+  } catch (error: any) {
+    if (!res.headersSent) res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.post('/pinterest/audio', async (req: Request, res: Response) => {
+  try {
+    const { url } = req.body;
+    if (!url) return res.status(400).json({ success: false, message: 'Missing url' });
+    await pinterestService.downloadAudio(url, res);
+  } catch (error: any) {
+    if (!res.headersSent) res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.get('/pinterest/auth/url', (req: Request, res: Response) => {
+  try {
+    const result = pinterestService.getAuthUrl();
+    res.json(result);
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.post('/pinterest/auth/callback', async (req: Request, res: Response) => {
+  try {
+    const { code } = req.body;
+    if (!code) return res.status(400).json({ success: false, message: 'Missing code' });
+    const result = await pinterestService.handleAuthCallback(code);
+    res.json(result);
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.get('/pinterest/accounts', (req: Request, res: Response) => {
+  try {
+    const result = pinterestService.getConnectedChannels();
+    res.json(result);
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.delete('/pinterest/accounts/:username', (req: Request, res: Response) => {
+  try {
+    const result = pinterestService.disconnectChannel(req.params.username);
+    res.json(result);
+  } catch (error: any) {
+    res.status(404).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.get('/pinterest/accounts/:username/check-token', async (req: Request, res: Response) => {
+  try {
+    const result = await pinterestService.checkTokenStatus(req.params.username);
+    res.json(result);
+  } catch (error: any) {
+    res.status(404).json({ success: false, message: error.message });
   }
 });
