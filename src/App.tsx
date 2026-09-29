@@ -1,7 +1,6 @@
 import { useEffect } from 'react';
 import { HashRouter, Routes, Route } from 'react-router-dom';
 import { DefaultLayout } from './components/layout/DefaultLayout';
-import { YouTubeSchedule } from './components/YouTubeSchedule';
 import { InstagramPage } from './pages/InstagramPage';
 import { TikTokPage } from './pages/TikTokPage';
 import { PinterestPage } from './pages/PinterestPage';
@@ -16,7 +15,7 @@ export function App() {
     <HashRouter>
       <Routes>
         <Route element={<DefaultLayout />}>
-          <Route path="/" element={<YouTubeSchedule />} />
+          <Route path="/" element={<YouTubeToolsPage />} />
           <Route path="/youtube-tools" element={<YouTubeToolsPage />} />
           <Route path="/instagram" element={<InstagramPage />} />
           <Route path="/tiktok" element={<TikTokPage />} />

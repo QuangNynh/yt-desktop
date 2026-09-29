@@ -1,6 +1,6 @@
 {
   "appId": "com.quangny.youtubescheduler",
-  "productName": "YouTube Scheduler",
+  "productName": "Lenyt Desktop",
   "directories": {
     "output": "release"
   },
@@ -37,7 +37,7 @@
     "allowToChangeInstallationDirectory": true,
     "createDesktopShortcut": "always",
     "createStartMenuShortcut": true,
-    "shortcutName": "YouTube Scheduler",
+    "shortcutName": "Lenyt Desktop",
     "installerIcon": "build/icon.ico",
     "uninstallerIcon": "build/icon.ico",
     "differentialPackage": false

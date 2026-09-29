@@ -13,17 +13,6 @@ export default defineConfig({
   server: {
     port: 8696,
     strictPort: true,
-    proxy: {
-      '/api': {
-        target: 'http://localhost:8695',
-        changeOrigin: true,
-      },
-      '/youtube/callback': {
-        target: 'http://localhost:8695',
-        changeOrigin: true,
-      },
-    },
-    
   },
   build: {
     outDir: 'dist',

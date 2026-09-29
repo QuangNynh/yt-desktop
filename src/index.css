@@ -70,3 +70,80 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(148, 163, 184, 0.4);
 }
+
+/* YouTube palette and component geometry from toolFe, scoped to this feature. */
+ .youtube-page, [data-youtube-theme] {
+  --radius: 0.65rem;
+  --export: 150.000 96.552% 22.745%;
+  --background: 0.000 0.000% 100.000%;
+  --foreground: 240.102 11.244% 3.984%;
+  --card: 0.000 0.000% 100.000%;
+  --card-foreground: 240.102 11.244% 3.984%;
+  --popover: 0.000 0.000% 100.000%;
+  --popover-foreground: 240.102 11.244% 3.984%;
+  --primary: 19.059 100.000% 50.000%;
+  --primary-foreground: 33.750 100.000% 96.463%;
+  --secondary: 239.992 3.510% 95.786%;
+  --secondary-foreground: 240.017 6.031% 9.981%;
+  --muted: 239.992 3.510% 95.786%;
+  --muted-foreground: 240.097 4.411% 46.337%;
+  --accent: 239.992 3.510% 95.786%;
+  --accent-foreground: 240.017 6.031% 9.981%;
+  --destructive: 357.206 100.000% 45.323%;
+  --border: 239.999 5.855% 90.031%;
+  --input: 239.999 5.855% 90.031%;
+  --ring: 31.832 100.000% 50.692%;
+  --chart-1: 31.568 100.000% 70.696%;
+  --chart-2: 24.644 100.000% 50.000%;
+  --chart-3: 17.999 100.000% 48.035%;
+  --chart-4: 15.705 100.000% 39.594%;
+  --chart-5: 16.970 100.000% 31.225%;
+  --sidebar: 180.000 0.000% 98.026%;
+  --sidebar-foreground: 240.102 11.244% 3.984%;
+  --sidebar-primary: 43.518 100.000% 93.287%;
+  --sidebar-primary-foreground: 33.750 100.000% 96.463%;
+  --sidebar-accent: 239.992 3.510% 95.786%;
+  --sidebar-accent-foreground: 240.017 6.031% 9.981%;
+  --sidebar-border: 239.999 5.855% 90.031%;
+  --sidebar-ring: 31.832 100.000% 50.692%;
+  --bgContent: 196.145 100.000% 96.691%;
+}
+.dark .youtube-page, .dark [data-youtube-theme] {
+  --background: 240.102 11.244% 3.984%;
+  --foreground: 180.000 0.000% 98.026%;
+  --export: 150.000 96.552% 22.745%;
+  --card: 240.017 6.031% 9.981%;
+  --card-foreground: 180.000 0.000% 98.026%;
+  --popover: 240.017 6.031% 9.981%;
+  --popover-foreground: 180.000 0.000% 98.026%;
+  --primary: 19.059 100.000% 50.000%;
+  --primary-foreground: 33.750 100.000% 96.463%;
+  --secondary: 240.047 4.043% 15.933%;
+  --secondary-foreground: 180.000 0.000% 98.026%;
+  --muted: 240.047 4.043% 15.933%;
+  --muted-foreground: 240.076 5.713% 64.296%;
+  --accent: 240.047 4.043% 15.933%;
+  --accent-foreground: 180.000 0.000% 98.026%;
+  --destructive: 358.748 100.000% 69.558%;
+  --border: 0.000 0.000% 100.000% / 10%;
+  --input: 0.000 0.000% 100.000% / 15%;
+  --ring: 15.988 83.116% 27.039%;
+  --chart-1: 31.568 100.000% 70.696%;
+  --chart-2: 24.644 100.000% 50.000%;
+  --chart-3: 17.999 100.000% 48.035%;
+  --chart-4: 15.705 100.000% 39.594%;
+  --chart-5: 16.970 100.000% 31.225%;
+  --sidebar: 240.017 6.031% 9.981%;
+  --sidebar-foreground: 180.000 0.000% 98.026%;
+  --sidebar-primary: 43.518 100.000% 93.287%;
+  --sidebar-primary-foreground: 33.750 100.000% 96.463%;
+  --sidebar-accent: 240.047 4.043% 15.933%;
+  --sidebar-accent-foreground: 180.000 0.000% 98.026%;
+  --sidebar-border: 0.000 0.000% 100.000% / 10%;
+  --sidebar-ring: 15.988 83.116% 27.039%;
+  --bgContent: 196.145 100.000% 96.691%;
+}
+.youtube-page { user-select: text; }
+@layer base {
+  .youtube-page *, [data-youtube-theme], [data-youtube-theme] * { border-color: hsl(var(--border)); }
+}

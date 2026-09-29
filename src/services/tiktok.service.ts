@@ -1,4 +1,5 @@
 import { api } from './youtube.service';
+import axios from 'axios';
 
 export interface TikTokResponse {
   success: boolean;
@@ -54,7 +55,9 @@ class TikTokService {
     } catch (error) {
       return {
         success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: axios.isAxiosError(error) && typeof error.response?.data?.message === 'string'
+          ? error.response.data.message
+          : error instanceof Error ? error.message : 'Không thể lấy danh sách kênh TikTok',
       };
     }
   }

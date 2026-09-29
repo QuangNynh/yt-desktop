@@ -2,7 +2,6 @@
  * TikTok Service - Adapted from toolBe for lenytdesktop
  * Handles: channel videos listing, video download, audio download
  * Uses: yt-dlp (youtube-dl-exec) + fluent-ffmpeg
- * Removed: ProxyService dependency
  */
 
 import { Response } from 'express';
@@ -11,6 +10,7 @@ import * as path from 'path';
 import * as os from 'os';
 import Ffmpeg from 'fluent-ffmpeg';
 import youtubedl from 'youtube-dl-exec';
+import { DATA_DIR } from './config';
 
 const youtubeDlExec: any = (youtubedl as any)?.exec || youtubedl;
 
@@ -23,24 +23,68 @@ try {
 }
 
 class TikTokService {
+  private readonly channelIdFile = path.join(DATA_DIR, 'tiktok-channel-ids.json');
+
+  private getCachedChannelId(username: string): string | undefined {
+    try {
+      const ids = JSON.parse(fs.readFileSync(this.channelIdFile, 'utf8'));
+      const id = ids[username.toLowerCase()];
+      return typeof id === 'string' && /^MS4wLjABAAAA[\w-]{64}$/.test(id) ? id : undefined;
+    } catch { return undefined; }
+  }
+
+  private saveChannelId(username: string, id: unknown) {
+    if (typeof id !== 'string' || !/^MS4wLjABAAAA[\w-]{64}$/.test(id)) return;
+    try {
+      const ids = fs.existsSync(this.channelIdFile) ? JSON.parse(fs.readFileSync(this.channelIdFile, 'utf8')) : {};
+      ids[username.toLowerCase()] = id;
+      fs.writeFileSync(this.channelIdFile, JSON.stringify(ids), 'utf8');
+    } catch (error) { console.warn('[TikTok] Could not save channel ID:', error); }
+  }
+
   async getChannelVideos(url: string, limitVal?: number) {
     try {
-      console.log(`[TikTok] Fetching videos from: ${url}${limitVal ? ` (limit: ${limitVal})` : ' (all)'}`);
+      const username = url.trim().match(/^(?:https?:\/\/(?:www\.)?tiktok\.com\/)?@?([\w.]+)\/?(?:\?.*)?$/i)?.[1];
+      if (!username) throw new Error('URL kênh TikTok không hợp lệ. Ví dụ: https://www.tiktok.com/@movies.vibe03');
+      const profileUrl = `https://www.tiktok.com/@${username}`;
+      console.log(`[TikTok] Fetching videos from: ${profileUrl}${limitVal ? ` (limit: ${limitVal})` : ' (all)'}`);
       const options: any = {
         dumpSingleJson: true,
         flatPlaylist: true,
         noWarnings: true,
-        noCheckCertificates: true,
       };
 
       if (limitVal !== undefined && limitVal > 0) {
         options.playlistItems = `1-${limitVal}`;
       }
 
-      const result = await youtubeDlExec(url, options);
-      if (!result || !result.stdout) throw new Error('No data returned from yt-dlp');
-
-      const parsed = JSON.parse(result.stdout);
+      const cachedId = this.getCachedChannelId(username);
+      const targets = cachedId ? [`tiktokuser:${cachedId}`, profileUrl] : [profileUrl];
+      let parsed: any;
+      let lastError = '';
+      for (const target of targets) {
+        const attempts = target === profileUrl ? 3 : 1;
+        for (let attempt = 0; attempt < attempts; attempt++) {
+          // Raw exec exposes stderr even on exit code 1; the wrapper otherwise hides the extractor error.
+          const result = await youtubeDlExec(target, options, { reject: false });
+          if (result?.exitCode === 0 && result.stdout) {
+            parsed = JSON.parse(result.stdout);
+            break;
+          }
+          lastError = String(result?.stderr || result?.error?.message || 'yt-dlp không trả dữ liệu').trim();
+          if (!/Unable to extract secondary user ID|Please wait|challenge|HTTP Error 429/i.test(lastError)) break;
+          if (attempt + 1 < attempts) await new Promise(resolve => setTimeout(resolve, 750 * (attempt + 1)));
+        }
+        if (parsed) break;
+      }
+      if (!parsed) {
+        const detail = lastError.split('\n').find(line => line.includes('ERROR:'))?.replace(/^.*ERROR:\s*/, '') || lastError.split('\n').at(-1) || 'TikTok không trả dữ liệu';
+        if (/Unable to extract secondary user ID|Please wait|challenge/i.test(detail)) {
+          throw new Error('TikTok đang yêu cầu xác minh truy cập trang kênh. Ứng dụng đã thử lại nhưng chưa lấy được danh sách video; hãy thử lại sau.');
+        }
+        throw new Error(detail);
+      }
+      this.saveChannelId(username, parsed.id || parsed.entries?.[0]?.channel_id);
       const rawEntries: any[] = parsed.entries ?? [parsed];
 
       const videos = rawEntries.filter((e) => e).map((entry) => {
@@ -50,7 +94,7 @@ class TikTokService {
           id: entry.id ?? null,
           title: entry.title ?? null,
           description: entry.description ?? null,
-          url: entry.url ?? `https://www.tiktok.com/@${parsed.title}/video/${entry.id}`,
+          url: `https://www.tiktok.com/@${username}/video/${entry.id}`,
           duration: entry.duration ?? null,
           view_count: Number(entry.view_count ?? 0),
           like_count: Number(entry.like_count ?? 0),
@@ -58,21 +102,21 @@ class TikTokService {
           repost_count: Number(entry.repost_count ?? 0),
           save_count: Number(entry.save_count ?? 0),
           created_at: createdAt,
-          uploader: entry.uploader ?? parsed.title ?? null,
+          uploader: entry.uploader ?? username,
           uploader_id: entry.uploader_id ?? null,
           thumbnails: entry.thumbnails ?? [],
         };
       });
 
       return {
-        channel: parsed.title ?? null,
-        title: parsed.title ?? null,
-        url: parsed.webpage_url ?? url,
+        channel: parsed.title ?? username,
+        title: parsed.title ?? username,
+        url: profileUrl,
         video_count: videos.length,
         videos,
       };
     } catch (error: any) {
-      throw new Error(`Failed to fetch TikTok videos: ${error.message}`);
+      throw new Error(`Không thể quét kênh TikTok: ${error.message}`);
     }
   }
 

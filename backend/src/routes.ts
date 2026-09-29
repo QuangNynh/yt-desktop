@@ -1,304 +1,60 @@
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
-import path from 'path';
-import { UPLOADS_DIR, loadSettings, saveSettings } from './config';
-import { youtubeService } from './youtube.service';
+import { UPLOADS_DIR } from './config';
 import { youtubeToolsService } from './youtube-tools.service';
 import { instagramService } from './instagram.service';
 import { tiktokService } from './tiktok.service';
 import { pinterestService } from './pinterest.service';
 
-const upload = multer({
-  dest: UPLOADS_DIR,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
-});
-
 export const apiRouter = Router();
-
-// =================== Settings API ===================
-apiRouter.get('/settings', (req: Request, res: Response) => {
-  res.json({ success: true, settings: loadSettings() });
-});
-
-apiRouter.post('/settings', (req: Request, res: Response) => {
-  const updated = saveSettings(req.body);
-  res.json({ success: true, settings: updated });
-});
-
-// =================== YouTube OAuth2 ===================
-apiRouter.get('/youtube/auth/url', (req: Request, res: Response) => {
-  try {
-    const url = youtubeService.getAuthUrl();
-    res.json({ success: true, url });
-  } catch (error: any) {
-    res.status(400).json({ success: false, message: error.message });
-  }
-});
-
-apiRouter.get('/youtube/login', (req: Request, res: Response) => {
-  try {
-    const url = youtubeService.getAuthUrl();
-    res.redirect(url);
-  } catch (error: any) {
-    res.status(400).send(`Error: ${error.message}`);
-  }
-});
-
-// Biến callback listener để thông báo cho Electron khi kết nối thành công
-type AuthSuccessCallback = (channelTitle: string) => void;
-let onAuthSuccess: AuthSuccessCallback | null = null;
-
-export function setAuthSuccessListener(cb: AuthSuccessCallback) {
-  onAuthSuccess = cb;
-}
-
-apiRouter.get('/youtube/callback', async (req: Request, res: Response) => {
-  const code = req.query.code as string;
-  if (!code) {
-    return res.status(400).send('<h3>Thiếu authorization code từ Google!</h3>');
-  }
-
-  try {
-    const result = await youtubeService.handleCallback(code);
-
-    // Kích hoạt callback focus app desktop ngay lập tức
-    if (onAuthSuccess) {
-      onAuthSuccess(result.channelTitle);
-    }
-    res.send(`
-      <!DOCTYPE html>
-      <html>
-        <head>
-          <meta charset="utf-8">
-          <title>Kết nối YouTube thành công</title>
-          <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #0f172a; color: white; }
-            .card { background: #1e293b; padding: 32px; border-radius: 12px; text-align: center; max-width: 440px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
-            h2 { color: #10b981; margin-bottom: 8px; }
-            p { color: #94a3b8; font-size: 14px; margin-bottom: 20px; line-height: 1.5; }
-            .btn { display: inline-block; background: #ef4444; color: white; border: none; padding: 12px 24px; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; text-decoration: none; transition: 0.2s; }
-            .btn:hover { background: #dc2626; }
-          </style>
-        </head>
-        <body>
-          <div class="card">
-            <h2>✓ Kết nối thành công!</h2>
-            <p>Đã liên kết kênh YouTube: <br><b style="color: #f8fafc; font-size: 16px;">${result.channelTitle}</b></p>
-            <p>Đang tự động chuyển bạn về ứng dụng Desktop...</p>
-            <a href="youtubescheduler://focus" class="btn" id="openBtn">Mở Ứng Dụng Desktop</a>
-          </div>
-          <script>
-            // Tự động kích hoạt mở app desktop
-            try {
-              window.location.href = "youtubescheduler://focus";
-            } catch (e) {}
-
-            // Tự động đóng tab trình duyệt sau khi kích hoạt
-            setTimeout(() => {
-              window.close();
-            }, 1500);
-          </script>
-        </body>
-      </html>
-    `);
-  } catch (error: any) {
-    res.status(400).send(`
-      <!DOCTYPE html>
-      <html>
-        <body style="background: #0f172a; color: #ef4444; font-family: sans-serif; padding: 40px; text-align: center;">
-          <h2>Kết nối thất bại</h2>
-          <p>${error.message}</p>
-        </body>
-      </html>
-    `);
-  }
-});
-
-apiRouter.post('/youtube/auth/callback', async (req: Request, res: Response) => {
-  const { code } = req.body;
-  if (!code) {
-    return res.status(400).json({ success: false, message: 'Missing code' });
-  }
-  try {
-    const result = await youtubeService.handleCallback(code);
-    res.json({
-      success: true,
-      message: 'YouTube authentication successful',
-      channel: result,
-    });
-  } catch (error: any) {
-    res.status(400).json({ success: false, message: error.message });
-  }
-});
-
-// =================== Channels Management ===================
-apiRouter.get('/youtube/channels', (req: Request, res: Response) => {
-  try {
-    const data = youtubeService.getConnectedChannels();
-    res.json(data);
-  } catch (error: any) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-apiRouter.delete('/youtube/channels/:channelId', (req: Request, res: Response) => {
-  try {
-    const result = youtubeService.disconnectChannel(req.params.channelId);
-    res.json(result);
-  } catch (error: any) {
-    res.status(404).json({ success: false, message: error.message });
-  }
-});
-
-apiRouter.get('/youtube/channels/:channelId/check-token', async (req: Request, res: Response) => {
-  try {
-    const result = await youtubeService.checkTokenStatus(req.params.channelId);
-    res.json(result);
-  } catch (error: any) {
-    res.status(404).json({ success: false, message: error.message });
-  }
-});
-
-// =================== Video & Schedule Management ===================
-apiRouter.get('/youtube/videos', async (req: Request, res: Response) => {
-  const channelId = req.query.channelId as string;
-  const maxResults = req.query.maxResults ? Number(req.query.maxResults) : 50;
-  const pageToken = req.query.pageToken as string | undefined;
-  const privacyStatus = req.query.privacyStatus as any;
-
-  if (!channelId) {
-    return res.status(400).json({ success: false, message: 'Missing channelId query param' });
-  }
-
-  // Kiểm tra trước kênh có trong storage không, nếu không có thì trả về videos: [] thay vì 400 error
-  const channels = youtubeService.getConnectedChannels().channels;
-  const exists = channels.some((c) => c.channelId === channelId);
-  if (!exists) {
-    return res.json({
-      success: false,
-      channelId,
-      totalResults: 0,
-      resultsPerPage: 0,
-      videos: [],
-      message: `Kênh "${channelId}" chưa được kết nối trong hệ thống. Vui lòng bấm "Thêm Kênh Mới".`,
-    });
-  }
-
-  try {
-    const result = await youtubeService.getVideos({
-      channelId,
-      maxResults,
-      pageToken,
-      privacyStatus,
-    });
-    res.json(result);
-  } catch (error: any) {
-    res.status(400).json({ success: false, message: error.message });
-  }
-});
-
-apiRouter.post('/youtube/schedule', async (req: Request, res: Response) => {
-  const { channelId, videoId, publishTime } = req.body;
-  if (!channelId || !videoId || !publishTime) {
-    return res.status(400).json({
-      success: false,
-      message: 'Thiếu channelId, videoId hoặc publishTime',
-    });
-  }
-
-  try {
-    const result = await youtubeService.scheduleVideo({
-      channelId,
-      videoId,
-      publishTime,
-    });
-    res.json(result);
-  } catch (error: any) {
-    res.status(400).json({ success: false, message: error.message });
-  }
-});
-
-apiRouter.post('/youtube/update-status', async (req: Request, res: Response) => {
-  const { channelId, videoId, privacyStatus } = req.body;
-  if (!channelId || !videoId || !privacyStatus) {
-    return res.status(400).json({
-      success: false,
-      message: 'Thiếu channelId, videoId hoặc privacyStatus (unlisted | private)',
-    });
-  }
-
-  if (!['private', 'unlisted'].includes(privacyStatus)) {
-    return res.status(400).json({
-      success: false,
-      message: 'Trạng thái không hợp lệ. Chỉ cho phép đổi sang private (nháp) hoặc unlisted (không công khai)',
-    });
-  }
-
-  try {
-    const result = await youtubeService.updateVideoStatus({
-      channelId,
-      videoId,
-      privacyStatus,
-    });
-    res.json(result);
-  } catch (error: any) {
-    res.status(400).json({ success: false, message: error.message });
-  }
-});
-
-apiRouter.post('/youtube/update-metadata', async (req: Request, res: Response) => {
-  const { channelId, videoId, title, description, tags } = req.body;
-  if (!channelId || !videoId || !title) {
-    return res.status(400).json({
-      success: false,
-      message: 'Thiếu channelId, videoId hoặc title',
-    });
-  }
-
-  try {
-    const result = await youtubeService.updateMetadata({
-      channelId,
-      videoId,
-      title,
-      description: description || '',
-      tags: Array.isArray(tags) ? tags : [],
-    });
-    res.json(result);
-  } catch (error: any) {
-    res.status(400).json({ success: false, message: error.message });
-  }
-});
-
-apiRouter.post('/youtube/thumbnail', upload.single('file'), async (req: Request, res: Response) => {
-  const channelId = req.body.channelId;
-  const videoId = req.body.videoId;
-  const file = req.file;
-
-  if (!channelId || !videoId || !file) {
-    return res.status(400).json({
-      success: false,
-      message: 'Thiếu channelId, videoId hoặc file ảnh thumbnail',
-    });
-  }
-
-  try {
-    const result = await youtubeService.updateThumbnail(channelId, videoId, file);
-    res.json(result);
-  } catch (error: any) {
-    res.status(400).json({ success: false, message: error.message });
-  }
-});
 
 // =================== YouTube Tools (Transcript, Audio, Video, URLs) ===================
 apiRouter.post('/youtube/transcript', async (req: Request, res: Response) => {
   try {
-    const { url } = req.body;
-    if (!url) return res.status(400).json({ success: false, message: 'Missing url' });
-    const result = await youtubeToolsService.getTranscript(url);
+    const videoId = req.body.videoId || req.body.url;
+    if (typeof videoId !== 'string' || !videoId.trim()) return res.status(400).json({ success: false, message: 'Missing videoId' });
+    const result = await youtubeToolsService.getTranscript(videoId);
     res.json(result);
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
+});
+
+apiRouter.post('/youtube/transcripts', async (req: Request, res: Response) => {
+  const { videoIds } = req.body;
+  if (!Array.isArray(videoIds) || !videoIds.length || videoIds.some(id => typeof id !== 'string' || !id.trim())) {
+    return res.status(400).json({ success: false, message: 'videoIds phải là danh sách Video ID' });
+  }
+  try { res.json(await youtubeToolsService.getTranscripts(videoIds)); }
+  catch (error: any) { res.status(400).json({ success: false, message: error.message }); }
+});
+
+apiRouter.post('/youtube/download-image', async (req: Request, res: Response) => {
+  if (typeof req.body.imageUrl !== 'string' || !req.body.imageUrl.trim()) return res.status(400).json({ success: false, message: 'Missing imageUrl' });
+  try { await youtubeToolsService.downloadImage(req.body.imageUrl, res); }
+  catch (error: any) { if (!res.headersSent) res.status(400).json({ success: false, message: error.message }); }
+});
+
+const audioUpload = multer({ dest: UPLOADS_DIR, limits: { fileSize: 500 * 1024 * 1024 } });
+for (const kind of ['srt', 'script']) {
+  apiRouter.post(`/youtube/${kind}`, audioUpload.single('file'), async (req: Request, res: Response) => {
+    if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
+    try {
+      const srt = await youtubeToolsService.audioToSrt(req.file.path);
+      const content = kind === 'srt' ? srt : youtubeToolsService.srtToScript(srt);
+      const extension = kind === 'srt' ? 'srt' : 'txt';
+      const filename = req.file.originalname.replace(/\.[^.]+$/, '') + '.' + extension;
+      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+      res.type('text/plain').send(content);
+    } catch (error: any) { res.status(400).json({ success: false, message: error.message }); }
+  });
+}
+
+apiRouter.post('/youtube/audio/youtubei', async (req: Request, res: Response) => {
+  const { url, format = 'mp3' } = req.body;
+  if (typeof url !== 'string' || !url.trim() || !['mp3', 'm4a'].includes(format)) return res.status(400).json({ success: false, message: 'URL hoặc định dạng audio không hợp lệ' });
+  try { await youtubeToolsService.downloadAudioYoutubei(url, res, format); }
+  catch (error: any) { if (!res.headersSent) res.status(400).json({ success: false, message: error.message }); }
 });
 
 apiRouter.post('/youtube/audio', async (req: Request, res: Response) => {
@@ -337,8 +93,61 @@ apiRouter.post('/instagram/info', async (req: Request, res: Response) => {
   try {
     const { url } = req.body;
     if (!url) return res.status(400).json({ success: false, message: 'Missing url' });
-    const result = await instagramService.getVideoInfo(url);
-    res.json(result);
+    res.json(await instagramService.getVideoInfo(url));
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.post('/instagram/channel', async (req: Request, res: Response) => {
+  try {
+    const username = req.body.username || req.body.url;
+    if (!username) return res.status(400).json({ success: false, message: 'Missing username' });
+    const page = req.query.page ? Number(req.query.page) : 1;
+    const pageSize = req.query.pageSize ? Number(req.query.pageSize) : 10;
+    if (!Number.isInteger(page) || !Number.isInteger(pageSize)) return res.status(400).json({ success: false, message: 'Invalid pagination' });
+    const userAgent = req.get('User-Agent');
+    res.json(await instagramService.getChannelVideos(
+      username,
+      req.query.type as string | undefined,
+      page,
+      pageSize,
+      undefined,
+      userAgent && userAgent.length <= 512 && !/[\r\n]/.test(userAgent) ? userAgent : undefined
+    ));
+  } catch (error: any) {
+    if (error.statusCode === 429 && error.retryAfterSeconds) res.setHeader('Retry-After', String(error.retryAfterSeconds));
+    res.status(error.statusCode || 400).json({
+      success: false,
+      message: error.message,
+      ...(error.statusCode === 429 ? { retryAfterSeconds: error.retryAfterSeconds, stage: error.stage, sessionConnected: instagramService.hasSession() } : {}),
+    });
+  }
+});
+
+apiRouter.post('/instagram/channel/export', async (req: Request, res: Response) => {
+  try {
+    const username = req.body.username || req.body.url;
+    if (!username) return res.status(400).json({ success: false, message: 'Missing username' });
+    await instagramService.exportChannelVideosToExcel(username, res, req.query.type as string | undefined);
+  } catch (error: any) {
+    if (!res.headersSent) res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.post('/instagram/channel/export-images', async (req: Request, res: Response) => {
+  try {
+    const username = req.body.username || req.body.url;
+    if (!username) return res.status(400).json({ success: false, message: 'Missing username' });
+    await instagramService.exportChannelImagesToZip(username, res, req.query.type as string | undefined);
+  } catch (error: any) {
+    if (!res.headersSent) res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+apiRouter.post('/instagram/channel/clear-cache', async (_req: Request, res: Response) => {
+  try {
+    res.json(await instagramService.clearAllChannelCache());
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -361,46 +170,6 @@ apiRouter.post('/instagram/audio', async (req: Request, res: Response) => {
     await instagramService.downloadAudio(url, res);
   } catch (error: any) {
     if (!res.headersSent) res.status(400).json({ success: false, message: error.message });
-  }
-});
-
-apiRouter.post('/instagram/channel', async (req: Request, res: Response) => {
-  try {
-    const { url, type, page, pageSize } = req.body;
-    if (!url) return res.status(400).json({ success: false, message: 'Missing url' });
-    const result = await instagramService.getChannelVideos(url, type, page, pageSize);
-    res.json(result);
-  } catch (error: any) {
-    res.status(400).json({ success: false, message: error.message });
-  }
-});
-
-apiRouter.post('/instagram/channel/export', async (req: Request, res: Response) => {
-  try {
-    const { url, type } = req.body;
-    if (!url) return res.status(400).json({ success: false, message: 'Missing url' });
-    await instagramService.exportChannelVideosToExcel(url, res, type);
-  } catch (error: any) {
-    if (!res.headersSent) res.status(400).json({ success: false, message: error.message });
-  }
-});
-
-apiRouter.post('/instagram/channel/export-images', async (req: Request, res: Response) => {
-  try {
-    const { url, type } = req.body;
-    if (!url) return res.status(400).json({ success: false, message: 'Missing url' });
-    await instagramService.exportChannelImagesToZip(url, res, type);
-  } catch (error: any) {
-    if (!res.headersSent) res.status(400).json({ success: false, message: error.message });
-  }
-});
-
-apiRouter.post('/instagram/channel/clear-cache', async (req: Request, res: Response) => {
-  try {
-    const result = await instagramService.clearAllChannelCache();
-    res.json(result);
-  } catch (error: any) {
-    res.status(400).json({ success: false, message: error.message });
   }
 });
 
@@ -552,4 +321,10 @@ apiRouter.get('/pinterest/accounts/:username/check-token', async (req: Request, 
   } catch (error: any) {
     res.status(404).json({ success: false, message: error.message });
   }
+});
+
+// Keep upload validation errors in the same JSON contract as the API.
+apiRouter.use((error: any, _req: Request, res: Response, next: import('express').NextFunction) => {
+  if (res.headersSent) return next(error);
+  res.status(400).json({ success: false, message: error.message });
 });

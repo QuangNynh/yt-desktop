@@ -24,14 +24,8 @@ interface NavItem {
 
 const navItems: NavItem[] = [
   {
-    label: 'YouTube Lên Lịch',
+    label: 'YouTube',
     path: '/',
-    icon: <CalendarClock className="h-5 w-5" />,
-    color: 'text-red-500',
-  },
-  {
-    label: 'YouTube Tools',
-    path: '/youtube-tools',
     icon: <Youtube className="h-5 w-5" />,
     color: 'text-red-500',
   },
@@ -82,7 +76,7 @@ export function AppSidebar() {
       {/* Nav */}
       <nav className="flex-1 py-2 px-2 space-y-1 overflow-y-auto">
         {navItems.map((item) => {
-          const isActive = location.pathname === item.path;
+          const isActive = location.pathname === item.path || (item.path === '/' && location.pathname === '/youtube-tools');
           return (
             <button
               key={item.path}

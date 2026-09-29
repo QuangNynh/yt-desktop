@@ -1,6 +1,7 @@
-import { app, BrowserWindow, shell, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, session, shell } from 'electron';
 import path from 'path';
 import { Server } from 'http';
+import { DownloadSettings, registerDownloadHandler } from './download-settings';
 
 // Tắt các cảnh báo không ảnh hưởng từ Chrome DevTools Autofill protocol
 app.commandLine.appendSwitch('disable-features', 'AutofillServerCommunication,AutofillAddress');
@@ -13,52 +14,140 @@ const gotSingleInstanceLock = app.requestSingleInstanceLock();
 
 let mainWindow: BrowserWindow | null = null;
 let backendServer: Server | null = null;
+let instagramLoginWindow: BrowserWindow | null = null;
+let instagramLoginPromise: Promise<boolean> | null = null;
+let instagramSessionSyncTimer: ReturnType<typeof setInterval> | null = null;
+const instagramPartition = 'persist:instagram';
+const downloadSettings = new DownloadSettings(app.getPath('userData'));
+let choosingDownloadDirectory: Promise<string | null> | null = null;
 
-// Hàm focus hoặc đưa app Desktop lên trước màn hình, hỗ trợ nạp callback URL nếu có
-function focusMainWindow(callbackUrl?: string) {
-  if (mainWindow) {
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-
-    // Trên Windows, toggle alwaysOnTop để đưa app lên trước các cửa sổ trình duyệt khác
-    mainWindow.setAlwaysOnTop(true);
-    mainWindow.focus();
-    mainWindow.setAlwaysOnTop(false);
-
-    try {
-      mainWindow.webContents.send('app-focused', callbackUrl);
-    } catch {}
-
-    if (callbackUrl && callbackUrl.includes('code=')) {
-      try {
-        const u = new URL(callbackUrl);
-        const code = u.searchParams.get('code');
-        if (code) {
-          mainWindow.loadURL(`http://localhost:8696/?code=${encodeURIComponent(code)}`);
-        }
-      } catch (e) {
-        // ignore
-      }
-    }
+function chooseDownloadDirectory() {
+  if (!choosingDownloadDirectory) {
+    choosingDownloadDirectory = (async () => {
+      const current = downloadSettings.getDirectory();
+      const options: Electron.OpenDialogOptions = {
+        title: 'Chọn thư mục tải xuống',
+        defaultPath: current || app.getPath('downloads'),
+        properties: ['openDirectory', 'createDirectory'],
+      };
+      const result = mainWindow ? await dialog.showOpenDialog(mainWindow, options) : await dialog.showOpenDialog(options);
+      if (result.canceled || !result.filePaths[0]) return null;
+      downloadSettings.setDirectory(result.filePaths[0]);
+      mainWindow?.webContents.send('downloads:directory-changed', result.filePaths[0]);
+      return result.filePaths[0];
+    })().finally(() => { choosingDownloadDirectory = null; });
   }
+  return choosingDownloadDirectory;
 }
 
-// IPC Handler để backend hoặc frontend yêu cầu focus app
-ipcMain.handle('focus-app', () => {
-  focusMainWindow();
-});
+async function getInstagramCookies() {
+  const cookies = await session.fromPartition(instagramPartition).cookies.get({ url: 'https://www.instagram.com/' });
+  const needed = new Set(['sessionid', 'csrftoken', 'ds_user_id', 'mid', 'rur', 'ig_did']);
+  return cookies.filter((cookie) =>
+    needed.has(cookie.name) && (cookie.domain === 'instagram.com' || cookie.domain?.endsWith('.instagram.com'))
+  );
+}
 
-// IPC Handler mở browser ngoài
-ipcMain.handle('open-external', async (_, url: string) => {
-  await shell.openExternal(url);
-});
+async function hasInstagramSession() {
+  return (await getInstagramCookies()).some((cookie) => cookie.name === 'sessionid' && Boolean(cookie.value));
+}
+
+async function syncInstagramSession() {
+  const loginSession = session.fromPartition(instagramPartition);
+  const cookies = await getInstagramCookies();
+  const connected = cookies.some((cookie) => cookie.name === 'sessionid' && Boolean(cookie.value));
+  const cookie = connected ? cookies.map((item) => `${item.name}=${item.value}`).join('; ') : null;
+  const userAgent = connected ? loginSession.getUserAgent() : null;
+  if (isDev) {
+    const response = await fetch('http://127.0.0.1:8695/api/v1/internal/instagram-session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cookie, userAgent }),
+    });
+    if (!response.ok) throw new Error('Không thể đồng bộ phiên Instagram với backend');
+  } else {
+    const { instagramService } = require('../dist-backend/instagram.service');
+    instagramService.setSessionCookie(cookie, userAgent);
+  }
+  return { connected };
+}
+
+function isTrustedAppSender(sender: Electron.WebContents) {
+  return sender === mainWindow?.webContents;
+}
+
+function openInstagramLogin(): Promise<boolean> {
+  if (instagramLoginPromise) {
+    instagramLoginWindow?.focus();
+    return instagramLoginPromise;
+  }
+
+  instagramLoginPromise = new Promise<boolean>((resolve) => {
+    const loginSession = session.fromPartition(instagramPartition);
+    const window = new BrowserWindow({
+      width: 560,
+      height: 760,
+      minWidth: 460,
+      minHeight: 600,
+      parent: mainWindow || undefined,
+      modal: false,
+      title: 'Kết nối Instagram',
+      webPreferences: {
+        partition: instagramPartition,
+        nodeIntegration: false,
+        contextIsolation: true,
+        sandbox: true,
+      },
+    });
+    instagramLoginWindow = window;
+    let finished = false;
+    const finish = (connected: boolean) => {
+      if (finished) return;
+      finished = true;
+      loginSession.cookies.removeListener('changed', onCookieChanged);
+      instagramLoginPromise = null;
+      instagramLoginWindow = null;
+      if (!window.isDestroyed()) window.close();
+      resolve(connected);
+    };
+    const checkSession = async () => {
+      if (await hasInstagramSession()) finish(true);
+    };
+    const onCookieChanged = (_event: Electron.Event, cookie: Electron.Cookie, _cause: string, removed: boolean) => {
+      if (cookie.name === 'sessionid' && !removed) void checkSession();
+    };
+    loginSession.cookies.on('changed', onCookieChanged);
+    window.on('closed', () => finish(false));
+    window.webContents.on('did-finish-load', () => void checkSession());
+    window.webContents.on('will-navigate', (event, url) => {
+      try {
+        const parsed = new URL(url);
+        if (parsed.protocol === 'https:' && (parsed.hostname.endsWith('.instagram.com') || parsed.hostname === 'instagram.com' || parsed.hostname.endsWith('.facebook.com') || parsed.hostname === 'facebook.com')) return;
+      } catch { /* block invalid navigation */ }
+      event.preventDefault();
+    });
+    window.webContents.setWindowOpenHandler(({ url }) => {
+      try {
+        const parsed = new URL(url);
+        if (parsed.protocol === 'https:' && (parsed.hostname.endsWith('.instagram.com') || parsed.hostname === 'instagram.com' || parsed.hostname.endsWith('.facebook.com') || parsed.hostname === 'facebook.com')) {
+          void window.loadURL(url);
+        }
+      } catch { /* block invalid popup */ }
+      return { action: 'deny' };
+    });
+    void window.loadURL('https://www.instagram.com/accounts/login/').catch((error) => {
+      console.error('[Instagram] Login window could not load:', error);
+    });
+  });
+  return instagramLoginPromise;
+}
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 
 async function startBackend() {
   // Ở dev mode, npm run dev:backend đã chạy backend riêng bằng tsx
   if (isDev) {
-    console.log('[Electron] Dev mode: Using standalone dev backend on port 8696.');
+    console.log('[Electron] Dev mode: Using standalone dev backend on port 8695.');
     return;
   }
 
@@ -84,7 +173,7 @@ function createWindow() {
     height: 900,
     minWidth: 1024,
     minHeight: 700,
-    title: 'YouTube Scheduler Desktop',
+    title: 'Lenyt Desktop',
     icon,
     webPreferences: {
       preload: finalPreload,
@@ -96,7 +185,6 @@ function createWindow() {
     titleBarStyle: 'default',
   });
 
-  // Hỗ trợ custom scheme hoặc focus từ callback
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
     return { action: 'deny' };
@@ -121,46 +209,60 @@ if (!gotSingleInstanceLock) {
   console.log('[Electron] Another instance is already running. Quitting duplicate instance immediately.');
   app.quit();
 } else {
-  // Đăng ký custom protocol để browser có thể gọi mở lại Desktop App
-  if (process.defaultApp) {
-    if (process.argv.length >= 2) {
-      app.setAsDefaultProtocolClient('youtubescheduler', process.execPath, [
-        path.resolve(process.argv[1]),
-      ]);
-    }
-  } else {
-    app.setAsDefaultProtocolClient('youtubescheduler');
-  }
-
-  // Xử lý khi click vào link youtubescheduler:// trên macOS
-  app.on('open-url', (event, url) => {
-    event.preventDefault();
-    focusMainWindow(url);
-  });
-
-  // Xử lý instance thứ hai trên Windows/Linux (khi người dùng click link giao thức youtubescheduler://)
-  app.on('second-instance', (_, commandLine) => {
-    console.log('[Electron] Second instance opened with args:', commandLine);
-    const customUrl = commandLine.find((arg) => arg.startsWith('youtubescheduler://'));
-    focusMainWindow(customUrl);
+  app.on('second-instance', () => {
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
   });
 
   app.whenReady().then(async () => {
     await startBackend();
     createWindow();
 
-    // Đăng ký listener lắng nghe khi có kênh kết nối thành công từ backend
-    try {
-      const routes = isDev ? require('../backend/src/routes') : require('../dist-backend/routes');
-      if (routes.setAuthSuccessListener) {
-        routes.setAuthSuccessListener((title: string) => {
-          console.log(`[Electron] Channel "${title}" connected! Focusing desktop window...`);
-          focusMainWindow();
-        });
+    registerDownloadHandler(session.defaultSession, downloadSettings, chooseDownloadDirectory);
+
+    ipcMain.handle('downloads:get-directory', (event) => {
+      if (!isTrustedAppSender(event.sender)) throw new Error('Unauthorized sender');
+      return downloadSettings.getDirectory();
+    });
+    ipcMain.handle('downloads:choose-directory', async (event) => {
+      if (!isTrustedAppSender(event.sender)) throw new Error('Unauthorized sender');
+      return chooseDownloadDirectory();
+    });
+
+    // The dev backend restarts on file changes and loses its in-memory session.
+    // Refresh it from Electron's persistent cookie store even when the user calls the API directly.
+    const refreshInstagramSession = () => {
+      void syncInstagramSession().catch((error) => {
+        console.warn('[Instagram] Session sync will retry:', error instanceof Error ? error.message : 'unknown error');
+      });
+    };
+    refreshInstagramSession();
+    instagramSessionSyncTimer = setInterval(refreshInstagramSession, 15_000);
+
+    ipcMain.handle('instagram:status', async (event) => {
+      if (!isTrustedAppSender(event.sender)) throw new Error('Unauthorized sender');
+      return syncInstagramSession();
+    });
+    ipcMain.handle('instagram:connect', async (event) => {
+      if (!isTrustedAppSender(event.sender)) throw new Error('Unauthorized sender');
+      if (await hasInstagramSession()) {
+        await session.fromPartition(instagramPartition).clearStorageData();
       }
-    } catch (e) {
-      // ignore
-    }
+      await openInstagramLogin();
+      return syncInstagramSession();
+    });
+    ipcMain.handle('instagram:sync', async (event) => {
+      if (!isTrustedAppSender(event.sender)) throw new Error('Unauthorized sender');
+      return syncInstagramSession();
+    });
+    ipcMain.handle('instagram:disconnect', async (event) => {
+      if (!isTrustedAppSender(event.sender)) throw new Error('Unauthorized sender');
+      const loginSession = session.fromPartition(instagramPartition);
+      await loginSession.clearStorageData();
+      return syncInstagramSession();
+    });
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) {
@@ -176,6 +278,7 @@ if (!gotSingleInstanceLock) {
   });
 
   app.on('before-quit', () => {
+    if (instagramSessionSyncTimer) clearInterval(instagramSessionSyncTimer);
     if (backendServer) {
       console.log('[Electron] Shutting down backend server...');
       backendServer.close();

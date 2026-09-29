@@ -8,6 +8,7 @@ module.exports = {
   theme: {
     extend: {
       colors: {
+        'sidebar-primary': 'hsl(var(--sidebar-primary))',
         border: 'hsl(var(--border))',
         input: 'hsl(var(--input))',
         ring: 'hsl(var(--ring))',

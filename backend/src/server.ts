@@ -1,20 +1,49 @@
 import express from 'express';
 import cors from 'cors';
+import axios from 'axios';
 import { loadSettings } from './config';
 import { apiRouter } from './routes';
+import { instagramService } from './instagram.service';
 
 export function createServer() {
+  for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'FTP_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'ftp_proxy']) {
+    delete process.env[key];
+  }
+  axios.defaults.proxy = false;
+
   const app = express();
 
-  app.use(cors());
+  app.use(cors({ exposedHeaders: ['Content-Disposition', 'Content-Length'] }));
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+  app.post('/api/v1/internal/instagram-session', (req, res) => {
+    const remote = req.socket.remoteAddress;
+    if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remote || '') || req.headers.origin) {
+      return res.status(403).json({ success: false });
+    }
+    const cookie = req.body?.cookie;
+    const userAgent = req.body?.userAgent;
+    if (cookie !== null && (typeof cookie !== 'string' || cookie.length > 8192 || /[\r\n]/.test(cookie))) {
+      return res.status(400).json({ success: false });
+    }
+    if (userAgent != null && (typeof userAgent !== 'string' || userAgent.length > 512 || /[\r\n]/.test(userAgent))) {
+      return res.status(400).json({ success: false });
+    }
+    instagramService.setSessionCookie(cookie, userAgent || null);
+    res.json({ connected: Boolean(cookie) });
+  });
+
+  app.get('/api/v1/internal/instagram-session', (req, res) => {
+    const remote = req.socket.remoteAddress;
+    if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remote || '') || req.headers.origin) {
+      return res.status(403).json({ success: false });
+    }
+    res.json({ connected: instagramService.hasSession() });
+  });
+
   // Mount API Router tại /api/v1
   app.use('/api/v1', apiRouter);
-
-  // Mount thêm tại root để hỗ trợ URL callback không có tiền tố /api/v1
-  app.use('/', apiRouter);
 
   // Route báo tín hiệu focus cho Electron
   app.get('/api/v1/internal/focus', (req, res) => {
@@ -44,16 +73,6 @@ export function startServer(port?: number) {
     } else {
       console.error(`[Backend] Server error:`, err);
     }
-  });
-
-  // Lắng nghe thêm trên các cổng phụ cũ (8000, 1111) nếu còn trống để hỗ trợ callback cũ
-  [8000, 1111].forEach((secPort) => {
-    try {
-      const secServer = app.listen(secPort, () => {
-        console.log(`[Backend] Compatibility callback listener running on http://localhost:${secPort}`);
-      });
-      secServer.on('error', () => {});
-    } catch {}
   });
 
   return server;

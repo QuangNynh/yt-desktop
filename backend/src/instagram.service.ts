@@ -1,7 +1,6 @@
 /**
  * Instagram Service - Adapted from toolBe for lenytdesktop
  * Handles: post info, video/audio download, channel feed, Excel export, ZIP export, cache
- * Removed: ProxyService dependency (direct connection only for desktop)
  */
 
 import axios from 'axios';
@@ -12,7 +11,13 @@ import { Response } from 'express';
 import * as ExcelJS from 'exceljs';
 import * as archiver from 'archiver';
 import Ffmpeg from 'fluent-ffmpeg';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { DATA_DIR } from './config';
+
+const execFileAsync = promisify(execFile);
+const ytDlpPath: string = require('youtube-dl-exec').constants.YOUTUBE_DL_PATH;
+const ffmpegPath: string = require('@ffmpeg-installer/ffmpeg').path;
 
 // Try to set ffmpeg path
 try {
@@ -43,7 +48,37 @@ export interface InstagramResponse {
   }[];
 }
 
+interface InstagramChannelCache {
+  user: any;
+  items: any[];
+  overallTotalCount: number;
+  nextMaxId?: string | null;
+  hasMore?: boolean;
+}
+
+type InstagramChannelError = Error & {
+  statusCode?: number;
+  retryAfterSeconds?: number;
+  stage?: 'profile' | 'feed';
+};
+
 class InstagramService {
+  private sessionCookie: string | null = null;
+  private sessionUserAgent: string | null = null;
+  private channelCooldownUntil = 0;
+  private channelCooldownStage: 'profile' | 'feed' = 'profile';
+  private channelCooldownHasRetryAfter = false;
+
+  setSessionCookie(cookie: string | null, userAgent: string | null = null) {
+    if (cookie !== this.sessionCookie) this.channelCooldownUntil = 0;
+    this.sessionCookie = cookie;
+    this.sessionUserAgent = cookie ? userAgent : null;
+  }
+
+  hasSession() {
+    return Boolean(this.sessionCookie?.match(/(?:^|;\s*)sessionid=[^;]+/));
+  }
+
   private getShortcode(input: string): string {
     const trimmed = input.trim();
     if (trimmed.includes('/') || trimmed.includes('instagram.com')) {
@@ -59,12 +94,13 @@ class InstagramService {
 
   private getUsername(input: string): string {
     const trimmed = input.trim();
-    if (trimmed.includes('/') || trimmed.includes('instagram.com')) {
-      const match = trimmed.match(/(?:instagram\.com\/)([A-Za-z0-9_.-]+)/);
-      if (!match) throw new Error('Invalid Instagram profile URL.');
-      return match[1];
+    const username = trimmed.includes('/') || trimmed.includes('instagram.com')
+      ? trimmed.match(/^https?:\/\/(?:www\.)?instagram\.com\/([A-Za-z0-9._]+)\/?(?:\?.*)?$/i)?.[1]
+      : trimmed;
+    if (!username || !/^[A-Za-z0-9._]+$/.test(username)) {
+      throw new Error('Invalid Instagram username or profile URL.');
     }
-    return trimmed;
+    return username;
   }
 
   private async getCSRFTokenAndCookies(): Promise<{ csrfToken: string; cookieHeader: string }> {
@@ -127,7 +163,7 @@ class InstagramService {
         'X-CSRFToken': csrfToken,
         'Cookie': cookieHeader,
         'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': this.sessionUserAgent || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Referer': `https://www.instagram.com/reel/${shortcode}/`,
         'Origin': 'https://www.instagram.com',
       },
@@ -195,16 +231,18 @@ class InstagramService {
     };
   }
 
-  private async getInstagramData(url: string): Promise<InstagramResponse> {
+  private async getInstagramData(url: string, sessionCookie?: string): Promise<InstagramResponse> {
     const shortcode = this.getShortcode(url);
     console.log(`[Instagram] Fetching metadata for shortcode: ${shortcode}`);
-    const { csrfToken, cookieHeader } = await this.getCSRFTokenAndCookies();
+    const { csrfToken, cookieHeader } = sessionCookie
+      ? { csrfToken: sessionCookie.match(/(?:^|;\s*)csrftoken=([^;]+)/)?.[1] || '', cookieHeader: sessionCookie }
+      : await this.getCSRFTokenAndCookies();
     const mediaData = await this.queryInstagramGraphQL(shortcode, csrfToken, cookieHeader);
     return this.formatInstagramResponse(mediaData);
   }
 
-  async getVideoInfo(url: string) {
-    const data = await this.getInstagramData(url);
+  async getVideoInfo(url: string, sessionCookie = this.sessionCookie || undefined) {
+    const data = await this.getInstagramData(url, sessionCookie);
     if (!data || !data.media_details || data.media_details.length === 0) {
       throw new Error('Cannot retrieve media details from this Instagram URL');
     }
@@ -228,13 +266,18 @@ class InstagramService {
     };
   }
 
-  private async getWebProfileInfo(username: string): Promise<any> {
+  private async getWebProfileInfo(username: string, sessionCookie?: string, requestUserAgent?: string): Promise<any> {
     const url = `https://www.instagram.com/api/v1/users/web_profile_info/?username=${username}`;
-    const response = await axios.request({
-      method: 'GET',
-      url,
-      headers: this.getUserFeedHeaders(username),
-    });
+    let response;
+    try {
+      response = await axios.request({
+        method: 'GET',
+        url,
+        headers: this.getUserFeedHeaders(username, sessionCookie, requestUserAgent),
+      });
+    } catch (error) {
+      throw this.channelRequestError(error, Boolean(sessionCookie), 'profile');
+    }
     const responseData = response.data;
     if (!responseData || !responseData.data || !responseData.data.user) {
       throw new Error('Failed to extract user profile data.');
@@ -242,7 +285,7 @@ class InstagramService {
     return responseData.data.user;
   }
 
-  async getChannelVideos(usernameOrUrl: string, typeFilter?: string, page: number = 1, pageSize: number = 10) {
+  async getChannelVideos(usernameOrUrl: string, typeFilter?: string, page: number = 1, pageSize: number = 10, sessionCookie = this.sessionCookie || undefined, requestUserAgent?: string) {
     const username = this.getUsername(usernameOrUrl);
     console.log(`[Instagram] Fetching channel for: ${username}, page: ${page}, pageSize: ${pageSize}, filter: ${typeFilter}`);
 
@@ -254,7 +297,7 @@ class InstagramService {
     await fs.promises.mkdir(cacheDir, { recursive: true });
     const cacheFilePath = path.join(cacheDir, `${username}.json`);
 
-    let cachedData: { user: any; items: any[]; overallTotalCount: number } | null = null;
+    let cachedData: InstagramChannelCache | null = null;
     const cacheExists = await fs.promises.access(cacheFilePath).then(() => true).catch(() => false);
     if (cacheExists) {
       try {
@@ -263,60 +306,55 @@ class InstagramService {
       } catch { /* Will fetch fresh data */ }
     }
 
-    let overallTotalCount = 0;
-    let formattedItems: any[] = [];
-    let userProfile: any = null;
-
-    if (cachedData) {
-      userProfile = cachedData.user;
-      formattedItems = cachedData.items;
-      overallTotalCount = cachedData.overallTotalCount;
-    } else {
-      const profileInfo = await this.getWebProfileInfo(username);
-      overallTotalCount = profileInfo.edge_owner_to_timeline_media?.count || 0;
-      userProfile = {
+    if (!cachedData || !cachedData.user || !Array.isArray(cachedData.items)) {
+      if (Date.now() < this.channelCooldownUntil) throw this.channelCooldownError();
+      const profileInfo = await this.getWebProfileInfo(username, sessionCookie, requestUserAgent);
+      cachedData = { user: {
         username: profileInfo.username || username,
         fullname: profileInfo.full_name || '',
         profilePicUrl: profileInfo.profile_pic_url || '',
         id: profileInfo.pk || '',
         followersCount: profileInfo.edge_followed_by?.count || 0,
         followingCount: profileInfo.edge_follow?.count || 0,
-      };
+      }, items: [], overallTotalCount: profileInfo.edge_owner_to_timeline_media?.count || 0, hasMore: true, nextMaxId: null };
+      await fs.promises.writeFile(cacheFilePath, JSON.stringify(cachedData), 'utf-8');
+    }
 
-      const baseFeedUrl = `https://www.instagram.com/api/v1/feed/user/${username}/username/`;
-      let allItems: any[] = [];
-      let currentMaxId: string | null = null;
-      let hasMore = true;
-      let pagesFetched = 0;
-      const MAX_PAGES = overallTotalCount > 0 ? Math.ceil(overallTotalCount / 12) : 100;
-
-      while (hasMore && pagesFetched < MAX_PAGES) {
-        let fetchUrl = baseFeedUrl;
-        if (currentMaxId) fetchUrl += `?max_id=${currentMaxId}`;
-
-        console.log(`[Instagram] Fetching page ${pagesFetched + 1}/${MAX_PAGES} for ${username}...`);
-        const response = await axios.request({
-          method: 'GET',
-          url: fetchUrl,
-          headers: this.getUserFeedHeaders(username),
-        });
-        const responseData = response.data;
-        if (!responseData || !responseData.items) break;
-
-        allItems = allItems.concat(responseData.items);
-        hasMore = responseData.more_available === true;
-        currentMaxId = responseData.next_max_id;
-        pagesFetched++;
-        if (!currentMaxId) hasMore = false;
-        if (hasMore) await new Promise((resolve) => setTimeout(resolve, 250));
+    const cache = cachedData;
+    // Older cache files were only written after a complete scan.
+    if (cache.hasMore === undefined) cache.hasMore = false;
+    const targetTypes = typeFilter?.split(',').map((t) => t.toLowerCase().trim()).filter((t) => ['video', 'image', 'carousel'].includes(t)) || [];
+    const matchingItems = () => targetTypes.length ? cache.items.filter((item) => targetTypes.includes(item.type)) : cache.items;
+    const endIndex = page * pageSize;
+    let pagesFetched = 0;
+    // One API call must not crawl an entire account. Further calls resume the saved cursor.
+    while (cache.hasMore && matchingItems().length < endIndex && pagesFetched < 4) {
+      if (Date.now() < this.channelCooldownUntil) {
+        if (matchingItems().length === 0) throw this.channelCooldownError();
+        break;
       }
-
-      formattedItems = allItems.map((item: any) => {
+      const fetchUrl = `https://www.instagram.com/api/v1/feed/user/${username}/username/${cache.nextMaxId ? `?max_id=${encodeURIComponent(cache.nextMaxId)}` : ''}`;
+      let response;
+      try {
+        response = await axios.request({ method: 'GET', url: fetchUrl, headers: this.getUserFeedHeaders(username, sessionCookie, requestUserAgent) });
+      } catch (error) {
+        const requestError = this.channelRequestError(error, Boolean(sessionCookie), 'feed');
+        if (requestError.statusCode !== 429 || matchingItems().length === 0) throw requestError;
+        break;
+      }
+      const responseData = response.data;
+      if (!responseData || !Array.isArray(responseData.items)) {
+        cache.hasMore = false;
+        break;
+      }
+      const existingIds = new Set(cache.items.map((item) => item.id));
+      for (const item of responseData.items) {
+        if (existingIds.has(item.id)) continue;
+        existingIds.add(item.id);
         let type = 'image';
         if (item.media_type === 2) type = 'video';
         else if (item.media_type === 8) type = 'carousel';
-
-        return {
+        cache.items.push({
           id: item.id,
           shortcode: item.code,
           type,
@@ -327,34 +365,33 @@ class InstagramService {
           comments: item.comment_count || 0,
           views: item.play_count || item.view_count || 0,
           takenAt: item.taken_at,
-        };
-      });
-
-      try {
-        await fs.promises.writeFile(cacheFilePath, JSON.stringify({ user: userProfile, items: formattedItems, overallTotalCount }, null, 2), 'utf-8');
-      } catch { /* ignore cache write error */ }
-    }
-
-    let filteredItems = [...formattedItems];
-    if (typeFilter) {
-      const allowedFilters = ['video', 'image', 'carousel'];
-      const targetTypes = typeFilter.split(',').map((t) => t.toLowerCase().trim()).filter((t) => allowedFilters.includes(t));
-      if (targetTypes.length > 0) {
-        filteredItems = filteredItems.filter((item: any) => targetTypes.includes(item.type));
+        });
       }
+      cache.nextMaxId = responseData.next_max_id || null;
+      cache.hasMore = responseData.more_available === true && Boolean(cache.nextMaxId);
+      pagesFetched++;
+      await fs.promises.writeFile(cacheFilePath, JSON.stringify(cache), 'utf-8');
+      if (cache.hasMore && matchingItems().length < endIndex && pagesFetched < 4) await new Promise((resolve) => setTimeout(resolve, 1000));
     }
-
-    filteredItems.sort((a, b) => (a.takenAt || 0) - (b.takenAt || 0));
+    let filteredItems = matchingItems();
+    // The feed arrives newest first; sorting oldest first would require a full account crawl.
+    filteredItems = [...filteredItems].sort((a, b) => (b.takenAt || 0) - (a.takenAt || 0));
 
     const startIndex = (page - 1) * pageSize;
-    const endIndex = startIndex + pageSize;
     const slicedItems = filteredItems.slice(startIndex, endIndex);
 
     return {
       success: true,
-      user: userProfile,
+      user: cache.user,
       items: slicedItems,
-      pagination: { page, pageSize, totalCount: filteredItems.length, hasMore: filteredItems.length > endIndex },
+      pagination: {
+        page, pageSize,
+        totalCount: cache.hasMore ? Math.max(cache.overallTotalCount, endIndex + 1) : filteredItems.length,
+        hasMore: cache.hasMore || filteredItems.length > endIndex,
+        loadedCount: filteredItems.length,
+        incompletePage: cache.hasMore && filteredItems.length < endIndex,
+        retryAfterSeconds: Date.now() < this.channelCooldownUntil ? Math.ceil((this.channelCooldownUntil - Date.now()) / 1000) : 0,
+      },
     };
   }
 
@@ -400,7 +437,7 @@ class InstagramService {
       worksheet.addRow({ stt: index + 1, link: `https://www.instagram.com/p/${item.shortcode}/`, likes: item.likes || 0, views: item.views || 0, takenAt: dateStr });
     });
 
-    const filename = `instagram_export_${username}_${Date.now()}.xlsx`;
+    const filename = `instagram_export_${username}${cacheData.hasMore ? '_partial' : ''}_${Date.now()}.xlsx`;
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     await workbook.xlsx.write(res);
@@ -428,7 +465,7 @@ class InstagramService {
     items.sort((a, b) => (a.takenAt || 0) - (b.takenAt || 0));
     if (items.length === 0) throw new Error('No items found matching the filter.');
 
-    const filename = `instagram_images_${username}_${Date.now()}.zip`;
+    const filename = `instagram_images_${username}${cacheData.hasMore ? '_partial' : ''}_${Date.now()}.zip`;
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 
@@ -475,74 +512,163 @@ class InstagramService {
     return { success: true, message: `Cleared ${deletedCount} Instagram cache files.`, deletedFilesCount: deletedCount };
   }
 
-  async downloadVideo(url: string, res: Response) {
-    const data = await this.getInstagramData(url);
-    if (!data?.media_details?.length) throw new Error('Cannot retrieve media details');
-    const videoMedia = data.media_details.find((m) => m.type === 'video');
-    if (!videoMedia) throw new Error('No video found in this Instagram post');
-
-    const username = data.post_info?.owner_username || 'instagram';
-    const filename = `instagram_${username}_${Date.now()}.mp4`;
-    res.setHeader('Content-Type', 'video/mp4');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-
-    const response = await axios({ url: videoMedia.url, method: 'GET', responseType: 'stream', headers: this.getDownloadHeaders() });
-    response.data.pipe(res);
+  async downloadVideo(url: string, res: Response, sessionCookie = this.sessionCookie || undefined) {
+    const shortcode = this.getShortcode(url);
+    try {
+      const data = await this.getInstagramData(url, sessionCookie);
+      const videoMedia = data.media_details.find((m) => m.type === 'video');
+      if (!videoMedia?.url) throw new Error('No video found in this Instagram post');
+      const response = await axios({ url: videoMedia.url, method: 'GET', responseType: 'stream', headers: this.getDownloadHeaders() });
+      this.pipeDownload(response.data, res, `instagram_${shortcode}.mp4`, 'video/mp4');
+    } catch (error) {
+      if (res.headersSent) throw error;
+      await this.downloadWithYtDlp(url, 'video', res);
+    }
   }
 
-  async downloadAudio(url: string, res: Response) {
-    const data = await this.getInstagramData(url);
-    if (!data?.media_details?.length) throw new Error('Cannot retrieve media details');
-    const videoMedia = data.media_details.find((m) => m.type === 'video');
-    if (!videoMedia) throw new Error('No video found in this Instagram post');
+  async downloadAudio(url: string, res: Response, sessionCookie = this.sessionCookie || undefined) {
+    const shortcode = this.getShortcode(url);
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lenyt-ig-audio-'));
+    try {
+      const data = await this.getInstagramData(url, sessionCookie);
+      const videoMedia = data.media_details.find((m) => m.type === 'video');
+      if (!videoMedia?.url) throw new Error('No video found in this Instagram post');
+      const videoPath = path.join(directory, 'source.mp4');
+      const response = await axios({ url: videoMedia.url, method: 'GET', responseType: 'stream', headers: this.getDownloadHeaders() });
+      await new Promise<void>((resolve, reject) => {
+        const writer = fs.createWriteStream(videoPath);
+        response.data.on('error', reject);
+        writer.on('finish', resolve);
+        writer.on('error', reject);
+        response.data.pipe(writer);
+      });
+      const audioPath = path.join(directory, 'audio.mp3');
+      await this.convertToMp3(videoPath, audioPath);
+      this.sendLocalDownload(audioPath, res, `instagram_${shortcode}.mp3`, 'audio/mpeg', directory);
+    } catch (error) {
+      fs.rmSync(directory, { recursive: true, force: true });
+      if (res.headersSent) throw error;
+      await this.downloadWithYtDlp(url, 'audio', res);
+    }
+  }
 
-    const username = data.post_info?.owner_username || 'instagram';
-    const tempDir = os.tmpdir();
-    const baseName = `ig-video-${Date.now()}`;
-    const tempVideoPath = path.join(tempDir, `${baseName}.mp4`);
-
-    // Download video to temp
-    const response = await axios({ url: videoMedia.url, method: 'GET', responseType: 'stream', headers: this.getDownloadHeaders() });
-    const writer = fs.createWriteStream(tempVideoPath);
-    response.data.pipe(writer);
-    await new Promise<void>((resolve, reject) => { writer.on('finish', resolve); writer.on('error', reject); });
-
-    // Extract audio with ffmpeg
-    const audioPath = path.join(tempDir, `${baseName}.mp3`);
-    await new Promise<void>((resolve, reject) => {
-      Ffmpeg(tempVideoPath)
-        .noVideo()
-        .audioCodec('libmp3lame')
-        .audioBitrate(192)
-        .save(audioPath)
-        .on('end', () => resolve())
-        .on('error', (err: Error) => reject(err));
+  private convertToMp3(input: string, output: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      Ffmpeg(input).noVideo().audioCodec('libmp3lame').audioBitrate(192)
+        .save(output).on('end', () => resolve()).on('error', reject);
     });
-
-    // Cleanup video
-    try { fs.unlinkSync(tempVideoPath); } catch { /* ignore */ }
-
-    const audioFilename = `instagram_${username}_${Date.now()}.mp3`;
-    const stat = fs.statSync(audioPath);
-    res.setHeader('Content-Type', 'audio/mpeg');
-    res.setHeader('Content-Length', stat.size.toString());
-    res.setHeader('Content-Disposition', `attachment; filename="${audioFilename}"`);
-
-    const audioStream = fs.createReadStream(audioPath);
-    audioStream.pipe(res);
-    res.on('finish', () => { try { fs.unlinkSync(audioPath); } catch {} });
-    audioStream.on('error', () => { try { fs.unlinkSync(audioPath); } catch {} });
   }
 
-  private getUserFeedHeaders(username: string) {
+  private pipeDownload(stream: NodeJS.ReadableStream, res: Response, filename: string, contentType: string) {
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    stream.on('error', (error: Error) => res.destroy(error));
+    stream.pipe(res);
+  }
+
+  private sendLocalDownload(file: string, res: Response, filename: string, contentType: string, directory: string) {
+    res.setHeader('Content-Length', fs.statSync(file).size);
+    const stream = fs.createReadStream(file);
+    const cleanup = () => fs.rmSync(directory, { recursive: true, force: true });
+    res.once('close', cleanup);
+    stream.once('error', (error) => res.destroy(error));
+    this.pipeDownload(stream, res, filename, contentType);
+  }
+
+  private async downloadWithYtDlp(input: string, kind: 'audio' | 'video', res: Response) {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lenyt-ig-ytdlp-'));
+    const shortcode = this.getShortcode(input);
+    const mediaType = /instagram\.com\/p\//i.test(input) ? 'p' : /instagram\.com\/tv\//i.test(input) ? 'tv' : 'reel';
+    const url = `https://www.instagram.com/${mediaType}/${shortcode}/`;
+    const args = [
+      '--no-playlist', '--no-warnings', '--no-progress',
+      '--socket-timeout', '20', '--retries', '1', '--ffmpeg-location', ffmpegPath,
+      '-o', path.join(directory, 'media.%(ext)s'),
+      ...(kind === 'video' ? ['-f', 'bv*+ba/b', '--merge-output-format', 'mp4', '--recode-video', 'mp4'] : ['-f', 'bestaudio/best']),
+      '--', url,
+    ];
+    try {
+      // macOS Python 3.14 can fail to load expat; prefer a working 3.11 when installed.
+      const candidates = process.platform === 'darwin'
+        ? ['/opt/homebrew/opt/python@3.11/bin/python3.11', '/usr/local/bin/python3.11']
+        : [];
+      const python = candidates.find((candidate) => fs.existsSync(candidate));
+      await execFileAsync(python || ytDlpPath, python ? [ytDlpPath, ...args] : args, { timeout: 180_000, maxBuffer: 1024 * 1024 });
+      const source = fs.readdirSync(directory).find((name) => name.startsWith('media.') && !name.endsWith('.part') && !name.endsWith('.ytdl'));
+      if (!source) throw new Error('yt-dlp không tạo được file media');
+      let file = path.join(directory, source);
+      if (kind === 'audio') {
+        const output = path.join(directory, 'audio.mp3');
+        await this.convertToMp3(file, output);
+        file = output;
+      }
+      this.sendLocalDownload(file, res, `instagram_${shortcode}.${kind === 'audio' ? 'mp3' : 'mp4'}`, kind === 'audio' ? 'audio/mpeg' : 'video/mp4', directory);
+    } catch (error) {
+      fs.rmSync(directory, { recursive: true, force: true });
+      throw new Error(`Không thể tải ${kind === 'audio' ? 'audio' : 'video'} Instagram bằng yt-dlp: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private getUserFeedHeaders(username: string, sessionCookie?: string, requestUserAgent?: string) {
     return {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'User-Agent': sessionCookie && (this.sessionUserAgent || requestUserAgent)
+        ? this.sessionUserAgent || requestUserAgent
+        : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'Accept': '*/*',
       'Accept-Language': 'en-US,en;q=0.9',
       'X-IG-App-ID': '936619743392459',
       'Referer': `https://www.instagram.com/${username}/`,
       'Origin': 'https://www.instagram.com',
+      ...(sessionCookie ? { 'Cookie': sessionCookie } : {}),
+      ...(sessionCookie?.match(/(?:^|;\s*)csrftoken=([^;]+)/)?.[1]
+        ? { 'X-CSRFToken': sessionCookie.match(/(?:^|;\s*)csrftoken=([^;]+)/)![1] }
+        : {}),
     };
+  }
+
+  private channelCooldownError(): InstagramChannelError {
+    const seconds = Math.max(1, Math.ceil((this.channelCooldownUntil - Date.now()) / 1000));
+    const sessionHint = this.hasSession()
+      ? ''
+      : ' Backend chưa nhận phiên đăng nhập Instagram; hãy mở ứng dụng và kết nối Instagram trước khi gọi API trực tiếp.';
+    const waitMessage = this.channelCooldownHasRetryAfter
+      ? `Instagram yêu cầu chờ khoảng ${seconds} giây.`
+      : `Ứng dụng tạm dừng ${seconds} giây trước khi thử lại; Instagram có thể tiếp tục giới hạn lâu hơn.`;
+    const result = new Error(`Instagram đang giới hạn truy cập khi ${this.channelCooldownStage === 'profile' ? 'lấy profile' : 'tải feed'}. ${waitMessage}${sessionHint}`) as InstagramChannelError;
+    result.statusCode = 429;
+    result.retryAfterSeconds = seconds;
+    result.stage = this.channelCooldownStage;
+    return result;
+  }
+
+  private channelRequestError(error: unknown, hasSession: boolean, stage: 'profile' | 'feed'): InstagramChannelError {
+    if (axios.isAxiosError(error)) {
+      const status = error.response?.status;
+      if (status === 429) {
+        const retryAfter = Number(error.response?.headers?.['retry-after']);
+        this.channelCooldownHasRetryAfter = Number.isFinite(retryAfter) && retryAfter > 0;
+        // Instagram often replies "Please wait a few minutes" without Retry-After.
+        // A one-minute retry repeatedly triggers the same limit for this account.
+        const waitSeconds = this.channelCooldownHasRetryAfter ? Math.min(retryAfter, 3600) : 300;
+        this.channelCooldownUntil = Math.max(this.channelCooldownUntil, Date.now() + waitSeconds * 1000);
+        this.channelCooldownStage = stage;
+        const result = this.channelCooldownError();
+        return result;
+      }
+      if (status === 401 || status === 403) {
+        const result = new Error(
+          hasSession
+            ? `Instagram từ chối phiên đăng nhập (${status}). Hãy kết nối lại Instagram trong ứng dụng hoặc thử lại sau nếu tài khoản bị giới hạn lượt truy cập.`
+            : `Instagram từ chối truy cập dữ liệu kênh (${status}). Không thể quét kênh này ẩn danh khi Instagram yêu cầu đăng nhập hoặc giới hạn lượt truy cập. Hãy thử lại sau hoặc dùng nút Kết nối Instagram trong ứng dụng.`
+        ) as InstagramChannelError;
+        result.statusCode = 502;
+        return result;
+      }
+      const result = new Error(`Không thể lấy dữ liệu kênh từ Instagram: ${error.message}`) as InstagramChannelError;
+      result.statusCode = 502;
+      return result;
+    }
+    return error instanceof Error ? error : new Error('Không thể lấy dữ liệu kênh từ Instagram');
   }
 
   private getDownloadHeaders() {

@@ -2,7 +2,7 @@
  * Pinterest Service - Adapted from toolBe for lenytdesktop
  * Handles: channel pins, video/image/audio download, Excel export, ZIP export, cache, OAuth
  * EXCLUDED: schedule features (schedulePin, getScheduledJobs, cancelScheduledJob)
- * Removed: ProxyService, SchedulerRegistry, NestJS decorators
+ * Removed: SchedulerRegistry and NestJS decorators
  */
 
 import axios from 'axios';

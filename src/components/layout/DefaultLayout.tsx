@@ -1,17 +1,37 @@
-import { useState } from 'react';
-import { Outlet } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { Outlet, useLocation } from 'react-router-dom';
 import { AppSidebar } from './AppSidebar';
-import { SettingsModal } from '../SettingsModal';
 import { Button } from '../ui/button';
-import { Settings, Moon, Sun } from 'lucide-react';
+import { FolderDown, Moon, Sun } from 'lucide-react';
 import { Toaster } from 'sonner';
 
 export function DefaultLayout() {
+  const { pathname } = useLocation();
+  const isYouTube = pathname === '/' || pathname === '/youtube-tools';
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     const root = document.documentElement;
     return root.classList.contains('dark') ? 'dark' : 'dark'; // default dark
   });
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [downloadDirectory, setDownloadDirectory] = useState<string | null>(null);
+  const [choosingDirectory, setChoosingDirectory] = useState(false);
+
+  useEffect(() => {
+    void window.desktopDownloads?.getDirectory().then(setDownloadDirectory).catch(() => {});
+    return window.desktopDownloads?.onDirectoryChanged(setDownloadDirectory);
+  }, []);
+
+  const chooseDownloadDirectory = async () => {
+    if (!window.desktopDownloads) return;
+    setChoosingDirectory(true);
+    try {
+      const directory = await window.desktopDownloads.chooseDirectory();
+      if (directory) setDownloadDirectory(directory);
+    } catch (error) {
+      console.error('Không thể chọn thư mục tải xuống:', error);
+    } finally {
+      setChoosingDirectory(false);
+    }
+  };
 
   const toggleTheme = () => {
     setTheme((prev) => {
@@ -36,16 +56,12 @@ export function DefaultLayout() {
         {/* Top bar */}
         <header className="h-14 flex items-center justify-end px-4 border-b border-border bg-background/95 backdrop-blur shrink-0">
           <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setSettingsOpen(true)}
-              className="h-8 text-xs flex items-center gap-1.5"
-            >
-              <Settings className="h-3.5 w-3.5" />
-              <span>Cài đặt API</span>
-            </Button>
-
+            {window.desktopDownloads && (
+              <Button variant="outline" size="sm" onClick={() => void chooseDownloadDirectory()} disabled={choosingDirectory} title={downloadDirectory || 'Chưa chọn thư mục tải xuống'} className="max-w-[min(55vw,320px)] gap-2">
+                <FolderDown className="h-4 w-4 shrink-0" />
+                <span className="truncate">{downloadDirectory ? `Lưu tại: ${downloadDirectory.split(/[\\/]/).filter(Boolean).at(-1)}` : 'Chọn thư mục tải xuống'}</span>
+              </Button>
+            )}
             <Button
               variant="ghost"
               size="icon"
@@ -59,13 +75,10 @@ export function DefaultLayout() {
         </header>
 
         {/* Page content */}
-        <main className="flex-1 overflow-y-auto p-4 md:p-6">
+        <main className={`flex-1 overflow-y-auto ${isYouTube ? 'youtube-page bg-background text-foreground' : 'p-4 md:p-6'}`}>
           <Outlet />
         </main>
       </div>
-
-      {/* Settings Modal */}
-      <SettingsModal open={settingsOpen} onOpenChange={setSettingsOpen} />
 
       {/* Toast */}
       <Toaster position="bottom-right" richColors theme={theme} />
