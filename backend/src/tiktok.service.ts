@@ -11,13 +11,17 @@ import * as os from 'os';
 import Ffmpeg from 'fluent-ffmpeg';
 import youtubedl from 'youtube-dl-exec';
 import { DATA_DIR } from './config';
+import { executablePath } from './binary-paths';
+import { playableMp4 } from './video-file';
 
 const youtubeDlExec: any = (youtubedl as any)?.exec || youtubedl;
 
+let ffmpegPath = 'ffmpeg';
 // Try to set ffmpeg path
 try {
   const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
-  Ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+  ffmpegPath = executablePath(ffmpegInstaller.path);
+  Ffmpeg.setFfmpegPath(ffmpegPath);
 } catch {
   console.warn('[TikTok] @ffmpeg-installer/ffmpeg not found, using system ffmpeg');
 }
@@ -51,6 +55,7 @@ class TikTokService {
       const options: any = {
         dumpSingleJson: true,
         flatPlaylist: true,
+        ignoreConfig: true,
         noWarnings: true,
       };
 
@@ -121,67 +126,33 @@ class TikTokService {
   }
 
   async downloadVideo(url: string, res: Response) {
-    let rawFile: string | null = null;
-    let finalFile: string | null = null;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lenyt-tiktok-video-'));
     try {
-      // Fetch metadata for title
+      const result = await youtubeDlExec(url, {
+        format: 'best', output: path.join(directory, 'source.%(ext)s'),
+        print: 'after_move:LENYT_TITLE=%(title)j',
+        ignoreConfig: true, noCheckCertificates: true, noWarnings: true,
+      } as any);
+      const sourceName = fs.readdirSync(directory).find(name => name.startsWith('source.') && !name.endsWith('.part') && !name.endsWith('.ytdl'));
+      if (!sourceName) throw new Error('yt-dlp không tạo được file video');
+      const source = path.join(directory, sourceName);
+      const video = await playableMp4(source, path.join(directory, 'video.mp4'), ffmpegPath);
+      const titleJson = result?.stdout?.match(/^LENYT_TITLE=(.*)$/m)?.[1];
       let title = 'tiktok_video';
-      try {
-        const metaResult = await youtubeDlExec(url, { dumpSingleJson: true, noWarnings: true, noCheckCertificates: true });
-        if (metaResult?.stdout) {
-          const meta = JSON.parse(metaResult.stdout);
-          title = meta.title || meta.description || title;
-        }
-      } catch { /* use default */ }
-
-      const sanitizedTitle = this.sanitizeFilename(title).substring(0, 50) || 'tiktok_video';
-      const filename = `${sanitizedTitle}.mp4`;
-
-      const tempDir = os.tmpdir();
-      rawFile = path.join(tempDir, `tiktok-${Date.now()}-raw.mp4`);
-      finalFile = path.join(tempDir, `tiktok-${Date.now()}-final.mp4`);
-
-      // Download video
-      await youtubeDlExec(url, { format: 'best', output: rawFile, noCheckCertificates: true, noWarnings: true });
-
-      if (!fs.existsSync(rawFile)) throw new Error('Downloaded file does not exist');
-
-      // Re-encode if needed
-      const reencode = await this.shouldReencodeVideo(rawFile);
-      if (reencode) {
-        await new Promise<void>((resolve, reject) => {
-          Ffmpeg(rawFile as string)
-            .videoCodec('libx264').audioCodec('aac')
-            .outputOptions(['-movflags +faststart', '-preset fast', '-crf 23', '-pix_fmt yuv420p'])
-            .save(finalFile as string)
-            .on('end', () => resolve()).on('error', (err: Error) => reject(err));
-        });
-      } else {
-        await new Promise<void>((resolve, reject) => {
-          Ffmpeg(rawFile as string)
-            .outputOptions(['-c copy', '-movflags +faststart'])
-            .save(finalFile as string)
-            .on('end', () => resolve()).on('error', (err: Error) => reject(err));
-        });
+      if (titleJson) {
+        try { title = JSON.parse(titleJson); } catch { /* use fallback title */ }
       }
-
-      try { fs.unlinkSync(rawFile); } catch {} rawFile = null;
-      if (!fs.existsSync(finalFile)) throw new Error('Processed file does not exist');
-
-      const stat = fs.statSync(finalFile);
+      const filename = `${this.sanitizeFilename(String(title)).substring(0, 50) || 'tiktok_video'}.mp4`;
+      const stat = fs.statSync(video);
       res.setHeader('Content-Type', 'video/mp4');
       res.setHeader('Content-Length', stat.size.toString());
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-      res.setHeader('Accept-Ranges', 'bytes');
-
-      const stream = fs.createReadStream(finalFile);
+      const stream = fs.createReadStream(video);
       stream.pipe(res);
-      const targetFile = finalFile;
-      res.on('finish', () => { fs.unlink(targetFile, () => {}); });
-      stream.on('error', () => { fs.unlink(targetFile, () => {}); });
+      res.once('close', () => fs.rm(directory, { recursive: true, force: true }, () => {}));
+      stream.once('error', error => res.destroy(error));
     } catch (error: any) {
-      if (rawFile && fs.existsSync(rawFile)) try { fs.unlinkSync(rawFile); } catch {}
-      if (finalFile && fs.existsSync(finalFile)) try { fs.unlinkSync(finalFile); } catch {}
+      fs.rmSync(directory, { recursive: true, force: true });
       throw new Error(`Failed to download TikTok video: ${error.message}`);
     }
   }
@@ -193,7 +164,7 @@ class TikTokService {
     try {
       let title = 'tiktok_audio';
       try {
-        const metaResult = await youtubeDlExec(url, { dumpSingleJson: true, noWarnings: true, noCheckCertificates: true });
+        const metaResult = await youtubeDlExec(url, { dumpSingleJson: true, ignoreConfig: true, noWarnings: true, noCheckCertificates: true });
         if (metaResult?.stdout) {
           const meta = JSON.parse(metaResult.stdout);
           title = meta.title || meta.description || title;
@@ -207,7 +178,7 @@ class TikTokService {
       rawFile = path.join(tempDir, `tiktok-audio-${ts}-raw`);
       finalFile = path.join(tempDir, `tiktok-audio-${ts}-final.mp3`);
 
-      await youtubeDlExec(url, { format: 'bestaudio/best', output: rawFile, noCheckCertificates: true, noWarnings: true });
+      await youtubeDlExec(url, { format: 'bestaudio/best', output: rawFile, ignoreConfig: true, noCheckCertificates: true, noWarnings: true });
 
       // Find actual downloaded file (yt-dlp appends extension)
       const baseTempName = `tiktok-audio-${ts}-raw`;
@@ -248,21 +219,6 @@ class TikTokService {
       if (finalFile && fs.existsSync(finalFile)) try { fs.unlinkSync(finalFile); } catch {}
       throw new Error(`Failed to download TikTok audio: ${error.message}`);
     }
-  }
-
-  private shouldReencodeVideo(filePath: string): Promise<boolean> {
-    return new Promise((resolve) => {
-      Ffmpeg.ffprobe(filePath, (err, metadata) => {
-        if (err) return resolve(true);
-        const videoStream = metadata?.streams?.find((s) => s.codec_type === 'video');
-        const audioStream = metadata?.streams?.find((s) => s.codec_type === 'audio');
-        if (!videoStream) return resolve(true);
-        const isH264 = videoStream.codec_name === 'h264';
-        const isAac = audioStream ? audioStream.codec_name === 'aac' : true;
-        const isYuv420p = videoStream.pix_fmt === 'yuv420p';
-        resolve(!(isH264 && isAac && isYuv420p));
-      });
-    });
   }
 
   private sanitizeFilename(name: string): string {

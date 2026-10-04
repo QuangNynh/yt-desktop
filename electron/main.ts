@@ -1,13 +1,28 @@
 import { app, BrowserWindow, dialog, ipcMain, session, shell } from 'electron';
+import fs from 'fs';
 import path from 'path';
 import { Server } from 'http';
 import { DownloadSettings, registerDownloadHandler } from './download-settings';
+import { registerUpdaterIpc } from './updater';
 
 // Tắt các cảnh báo không ảnh hưởng từ Chrome DevTools Autofill protocol
 app.commandLine.appendSwitch('disable-features', 'AutofillServerCommunication,AutofillAddress');
 
+// Giữ phiên đăng nhập và cấu hình tải xuống của các bản Lenyt Desktop trước đây.
+if (app.isPackaged) {
+  const previousUserData = path.join(app.getPath('appData'), 'Lenyt Desktop');
+  fs.mkdirSync(previousUserData, { recursive: true });
+  app.setPath('userData', previousUserData);
+}
+
 // Thiết lập đường dẫn lưu trữ vào UserData của Electron
 process.env.USER_DATA_PATH = app.getPath('userData');
+if (app.isPackaged && (process.platform === 'darwin' || process.platform === 'win32')) {
+  process.env.YOUTUBE_DL_DIR = path.join(process.resourcesPath, 'bin');
+  process.env.YOUTUBE_DL_FILENAME = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
+} else if (app.isPackaged) {
+  process.env.YOUTUBE_DL_DIR = path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'youtube-dl-exec', 'bin');
+}
 
 // Đảm bảo chỉ có một instance duy nhất chạy (Single Instance Lock)
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
@@ -73,7 +88,11 @@ async function syncInstagramSession() {
 }
 
 function isTrustedAppSender(sender: Electron.WebContents) {
-  return sender === mainWindow?.webContents;
+  if (sender !== mainWindow?.webContents) return false;
+  const url = sender.getURL();
+  return isDev
+    ? url.startsWith('http://localhost:8696/') || url === 'http://localhost:8696'
+    : url.startsWith('file://');
 }
 
 function openInstagramLogin(): Promise<boolean> {
@@ -151,13 +170,9 @@ async function startBackend() {
     return;
   }
 
-  try {
-    const backendModule = require('../dist-backend/server');
-    backendServer = backendModule.startServer(8696);
-    console.log('[Electron] Production backend server started successfully on port 8696.');
-  } catch (err: any) {
-    console.error('[Electron] Failed to start backend server:', err.message);
-  }
+  const backendModule = require('../dist-backend/server');
+  backendServer = await backendModule.startServer(8696);
+  console.log('[Electron] Production backend server started successfully on 127.0.0.1:8696.');
 }
 
 function createWindow() {
@@ -171,9 +186,9 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1360,
     height: 900,
-    minWidth: 1024,
-    minHeight: 700,
-    title: 'Lenyt Desktop',
+    minWidth: 480,
+    minHeight: 480,
+    title: 'CrawlData',
     icon,
     webPreferences: {
       preload: finalPreload,
@@ -186,8 +201,22 @@ function createWindow() {
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    if (url.startsWith('https://') || url.startsWith('http://')) void shell.openExternal(url);
     return { action: 'deny' };
+  });
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    const current = mainWindow?.webContents.getURL();
+    if (url !== current) event.preventDefault();
+  });
+
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown' || input.isAutoRepeat) return;
+    const isMacShortcut = process.platform === 'darwin' && input.meta && input.alt && input.key.toLowerCase() === 'i';
+    const isOtherShortcut = process.platform !== 'darwin' && input.control && input.shift && input.key.toLowerCase() === 'i';
+    if (input.key === 'F12' || isMacShortcut || isOtherShortcut) {
+      event.preventDefault();
+      mainWindow?.webContents.toggleDevTools();
+    }
   });
 
   const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
@@ -217,8 +246,13 @@ if (!gotSingleInstanceLock) {
   });
 
   app.whenReady().then(async () => {
+    await Promise.all([
+      session.defaultSession.setProxy({ mode: 'direct' }),
+      session.fromPartition(instagramPartition).setProxy({ mode: 'direct' }),
+    ]);
     await startBackend();
     createWindow();
+    registerUpdaterIpc(ipcMain, () => mainWindow);
 
     registerDownloadHandler(session.defaultSession, downloadSettings, chooseDownloadDirectory);
 
@@ -229,6 +263,32 @@ if (!gotSingleInstanceLock) {
     ipcMain.handle('downloads:choose-directory', async (event) => {
       if (!isTrustedAppSender(event.sender)) throw new Error('Unauthorized sender');
       return chooseDownloadDirectory();
+    });
+    ipcMain.handle('downloads:youtube', async (event, request) => {
+      if (!isTrustedAppSender(event.sender)) throw new Error('Unauthorized sender');
+      const action = request?.action;
+      if (!['list', 'create', 'pause', 'resume', 'retry', 'clear-history'].includes(action)) throw new Error('Thao tác tải không hợp lệ');
+      let input = { ...request };
+      if (action === 'create') {
+        const directory = downloadSettings.getDirectory() || await chooseDownloadDirectory();
+        if (!directory) throw new Error('Hãy chọn thư mục tải xuống trước khi bắt đầu');
+        input = { action, urls: request.urls, kind: request.kind, quality: request.quality, directory };
+      }
+      if (isDev) {
+        const response = await fetch('http://127.0.0.1:8695/api/v1/internal/youtube-downloads', {
+          method: action === 'list' ? 'GET' : 'POST',
+          ...(action === 'list' ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) }),
+          signal: AbortSignal.timeout(15_000),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.message || 'Không thể truy cập hàng đợi YouTube');
+        return data;
+      }
+      const { youtubeDownloads } = require('../dist-backend/youtube-downloads');
+      if (action === 'list') return youtubeDownloads.snapshot();
+      if (action === 'create') return youtubeDownloads.add(input);
+      if (action === 'clear-history') return youtubeDownloads.clearHistory(request.kind);
+      return youtubeDownloads.control(request.id, action);
     });
 
     // The dev backend restarts on file changes and loses its in-memory session.
@@ -269,6 +329,11 @@ if (!gotSingleInstanceLock) {
         createWindow();
       }
     });
+  }).catch(error => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[Electron] Could not start desktop app:', error);
+    dialog.showErrorBox('Không thể khởi động CrawlData', `API nội bộ không khởi động được: ${message}`);
+    app.quit();
   });
 
   app.on('window-all-closed', () => {
@@ -280,6 +345,7 @@ if (!gotSingleInstanceLock) {
   app.on('before-quit', () => {
     if (instagramSessionSyncTimer) clearInterval(instagramSessionSyncTimer);
     if (backendServer) {
+      require('../dist-backend/youtube-downloads').youtubeDownloads.shutdown();
       console.log('[Electron] Shutting down backend server...');
       backendServer.close();
     }

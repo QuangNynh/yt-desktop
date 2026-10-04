@@ -1,4 +1,4 @@
-# Lenyt Desktop
+# CrawlData
 
 Ứng dụng Desktop (Electron + React + Express) cung cấp công cụ tải và xử lý nội dung YouTube, Instagram, TikTok và Pinterest.
 
@@ -50,6 +50,12 @@ npm run package:win
 
 File cài đặt xuất xưởng sẽ nằm trong thư mục `release/`.
 
+### Cập nhật ứng dụng
+
+Vào **Settings / About → Check for Updates** trên bản đã cài đặt. Ứng dụng chỉ kiểm tra khi người dùng bấm nút; tải và cài bản mới cũng cần người dùng xác nhận. Bản development không kiểm tra cập nhật.
+
+Các lệnh push bản mới nằm trong [RELEASE_PUSH.md](RELEASE_PUSH.md). Cấu hình ký macOS, các file `latest*.yml` và cách thử update chi tiết nằm trong [docs/releasing.md](docs/releasing.md). Repo mã nguồn phát hành riêng là [realessToolCrawlData](https://github.com/QuangNynh/realessToolCrawlData).
+
 
 ## YouTube Tools
 
@@ -63,12 +69,21 @@ API tương ứng nằm dưới `/api/v1/youtube`:
 
 Các API quản lý kênh, OAuth, metadata, thumbnail và lên lịch YouTube đã được loại bỏ. Audio gốc ưu tiên M4A, giữ WebM/Opus nếu nguồn không có AAC để không giảm chất lượng. Video xuất MP4 H.264/AAC. Chuyển audio sang SRT/kịch bản cần lệnh `whisper` trong PATH; ffmpeg dùng binary đi kèm ứng dụng.
 
+Tải hàng loạt audio/video trong Electron dùng hàng đợi trên đĩa, mỗi lô tối đa 1.000 link. Chọn thư mục tải, dán link rồi bấm **Get Audio** hoặc **Get Video**. File chỉ được đánh dấu **Đã lưu file** sau khi kiểm tra media và ghi xong vào thư mục. Audio và video dùng chung một lượt tải, 2 fragment song song và nghỉ 4–6 giây giữa các file. Khi gặp giới hạn YouTube, toàn bộ hàng đợi nghỉ từ 2 phút, tăng dần đến khoảng 1 giờ, có độ lệch ngẫu nhiên và tôn trọng `Retry-After`. Lỗi mạng được thử lại với thời gian nghỉ tăng dần; hai loại lỗi này không bị bỏ sau 3 vòng như trước. File `.part` được giữ để tiếp tục tải, fragment thiếu sẽ báo lỗi thay vì xuất file thiếu đoạn.
+
+Chuyển tab không dừng tải. **Tạm dừng** lưu xong file đang tải rồi dừng lô; **Tiếp tục** giữ thời gian chờ YouTube; **Thử lại mục lỗi** chỉ xếp lại các mục lỗi. Hàng đợi, lỗi và vị trí file lưu trong `data/youtube-downloads/` ở vùng dữ liệu ứng dụng, tự khôi phục sau khi mở lại. Tên file giữ số thứ tự; nếu đã có file cùng tên, thêm `(2)`, `(3)` để tránh ghi đè. Có thể **Xuất link chưa tải** để đối chiếu các mục còn lại. Quét kênh dùng metadata của danh sách thay vì gửi thêm một yêu cầu cho từng video; các trường YouTube không trả về sẽ để trống.
+
+Hai tab audio/video có nút **Xóa lịch sử tải** để dọn toàn bộ lô đã kết thúc của loại đang xem (gồm mục thành công và lỗi). Thao tác xóa dữ liệu lịch sử, thư mục tải tạm và file lưu tạm còn sót của các lô đó, đồng thời thu gọn `queue.json` và bản sao `queue.json.bak`. File media đã lưu trong thư mục tải xuống được giữ nguyên. Lô còn mục đang chờ, đang tải, chờ thử lại hoặc đang tạm dừng để tiếp tục sẽ được giữ lại; nút tắt khi không có lịch sử đã kết thúc. Lô không dọn được do lỗi ổ đĩa/quyền ghi được giữ lại để thử xóa lần sau.
+
+Video riêng tư, bị xóa, giới hạn vùng/tuổi hoặc cần quyền thành viên được giữ với thông báo **Cần xử lý**. Lỗi ổ đĩa/quyền ghi tạm dừng lô để khắc phục. Lỗi chưa phân loại được thử tối đa 5 lần rồi giữ lại để thử thủ công. Không thể bảo đảm mọi URL đều tải được hoặc tự giải quyết CAPTCHA/quyền truy cập. Chính sách chờ và giới hạn yêu cầu dựa trên [tài liệu yt-dlp](https://github.com/yt-dlp/yt-dlp#download-options) và [FAQ về lỗi 429](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#http-error-429-too-many-requests-or-402-payment-required).
+
 Kiểm tra sau khi sửa:
 
 ```bash
 npx tsc --noEmit
 npm run build
 npm run test:youtube
+npm run test:youtube-downloads
 npm run test:youtube-ui
 ```
 

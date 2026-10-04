@@ -10,9 +10,13 @@ import axios from 'axios';
 import Ffmpeg from 'fluent-ffmpeg';
 import sharp from 'sharp';
 import { exec as youtubeDlExec } from 'youtube-dl-exec';
+import { executablePath } from './binary-paths';
+import { youtubeVideoId } from './youtube-download-policy';
+import { playableMp4 } from './video-file';
+import type { MediaFile, MediaKind } from './youtube-download-queue';
 
 const execFileAsync = promisify(execFile);
-const ffmpegPath: string = require('@ffmpeg-installer/ffmpeg').path;
+const ffmpegPath: string = executablePath(require('@ffmpeg-installer/ffmpeg').path);
 Ffmpeg.setFfmpegPath(ffmpegPath);
 // Preserve native ESM loading in the CommonJS Electron backend.
 const loadYoutube = new Function('return import("youtubei.js")') as () => Promise<any>;
@@ -46,13 +50,7 @@ export class YouTubeToolsService {
   }
 
   private extractVideoId(value: string): string {
-    if (/^[\w-]{11}$/.test(value.trim())) return value.trim();
-    try {
-      const url = new URL(value);
-      const id = url.hostname === 'youtu.be' ? url.pathname.slice(1) : url.searchParams.get('v') || url.pathname.split('/').pop();
-      if (id && /^[\w-]{11}$/.test(id)) return id;
-    } catch {}
-    throw new Error('Video ID hoặc URL YouTube không hợp lệ');
+    return youtubeVideoId(value);
   }
   private async sleep(ms: number) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -199,14 +197,18 @@ export class YouTubeToolsService {
     ); // Limit length and provide fallback
   }
 
-  async getChannelVideos(url: string, concurrency = 10) {
+  async getChannelVideos(url: string) {
     try {
       // Bước 1: flatPlaylist:true → lấy danh sách video ID rất nhanh
       const ytDlOpts: any = {
         dumpSingleJson: true,
         flatPlaylist: true,
+        ignoreConfig: true,
         noWarnings: true,
-        noCheckCertificates: true,
+        socketTimeout: 30,
+        retries: 3,
+        extractorRetries: 1,
+        sleepRequests: 0.75,
       };
       const result = await youtubeDlExec(url, ytDlOpts);
 
@@ -221,67 +223,30 @@ export class YouTubeToolsService {
         else if (entry.id) rawEntries.push(entry);
       };
       visit(parsed);
-      await this.ready();
-
-      // Bước 2: batch-fetch full metadata song song qua youtubei.js
-      const limit = pLimit(concurrency);
-
-      const videos = await Promise.all(
-        rawEntries.map((entry: any) =>
-          limit(async () => {
-            const id: string = entry.id ?? entry.url?.split('v=')[1]?.split('&')[0];
-            if (!id) return null;
-
-            try {
-              const info = await this.youtube.getInfo(id);
-              const b = info.basic_info;
-              const createdAt = b.start_timestamp
-                ? new Date(b.start_timestamp).toISOString()
-                : ((info as any).primary_info?.published?.toString() ||
-                   (info as any).primary_info?.published?.text ||
-                   null);
-
-              return {
-                id,
-                title: b.title ?? entry.title ?? null,
-                url: `https://www.youtube.com/watch?v=${id}`,
-                description: b.short_description ?? null,
-                duration: b.duration ?? null,
-                view_count: Number(b.view_count ?? 0),
-                like_count: Number(b.like_count ?? 0),
-                channel_id: b.channel_id ?? null,
-                channel: b.author ?? null,
-                thumbnails: b.thumbnail ?? null,
-                keywords: b.keywords ?? [],
-                is_live: b.is_live ?? false,
-                category: b.category ?? null,
-                created_at: createdAt,
-              };
-            } catch {
-              // Nếu video bị ẩn/lỗi thì trả về thông tin cơ bản từ flatPlaylist
-              return {
-                id,
-                title: entry.title ?? null,
-                url: `https://www.youtube.com/watch?v=${id}`,
-                description: null,
-                duration: entry.duration ?? null,
-                view_count: null,
-                like_count: null,
-                channel_id: null,
-                channel: entry.uploader ?? null,
-                thumbnails: null,
-                keywords: [],
-                is_live: false,
-                category: null,
-                created_at: null,
-              };
-            }
-          }),
-        ),
-      );
-
-
-      const validVideos = videos.filter(Boolean);
+      // Flat channel entries already contain the fields used by the table.
+      // Avoid one additional player request per video in a 1,000-item channel.
+      const seen = new Set<string>();
+      const validVideos = rawEntries.filter(entry => {
+        if (!/^[\w-]{11}$/.test(entry.id) || seen.has(entry.id)) return false;
+        seen.add(entry.id);
+        return true;
+      }).map(entry => ({
+        id: entry.id,
+        title: entry.title ?? null,
+        url: `https://www.youtube.com/watch?v=${entry.id}`,
+        description: entry.description ?? null,
+        duration: entry.duration ?? null,
+        view_count: entry.view_count ?? null,
+        like_count: entry.like_count ?? null,
+        channel_id: entry.channel_id ?? parsed.channel_id ?? null,
+        channel: entry.channel ?? entry.uploader ?? parsed.channel ?? null,
+        thumbnails: entry.thumbnails ?? null,
+        keywords: entry.tags ?? [],
+        is_live: entry.live_status === 'is_live',
+        category: entry.categories?.[0] ?? null,
+        created_at: entry.timestamp || entry.release_timestamp
+          ? new Date((entry.timestamp || entry.release_timestamp) * 1000).toISOString() : null,
+      }));
 
       return {
         type: parsed.extractor_key ?? parsed._type ?? 'unknown',
@@ -393,20 +358,80 @@ export class YouTubeToolsService {
   }
 
 
-  private async download(url: string, output: string, format: string, video = false) {
-    let lastError: unknown;
-    for (const client of video ? ['web,web_embedded', 'mweb', ''] : ['ios', 'mweb', 'web,web_embedded', '']) {
-      try {
-        await youtubeDlExec(url, {
-          format, output, noPlaylist: true, noWarnings: true,
-          ffmpegLocation: ffmpegPath,
-          ...(video ? { mergeOutputFormat: 'mp4' } : {}),
-          ...(client ? { extractorArgs: `youtube:player_client=${client}` } : {}),
-        });
-        return;
-      } catch (error) { lastError = error; }
+  private async download(url: string, output: string, format: string, video = false, signal?: AbortSignal, progress?: (value: number) => void): Promise<string> {
+    const options: any = {
+      format, output, noPlaylist: true, noWarnings: true, ignoreConfig: true,
+      ffmpegLocation: ffmpegPath,
+      jsRuntimes: `node:${process.execPath}`,
+      continue: true, part: true, socketTimeout: 30,
+      retries: 3, fragmentRetries: 3, extractorRetries: 1, fileAccessRetries: 2,
+      retrySleep: ['http:exp=2:15', 'fragment:exp=2:15', 'extractor:5'],
+      sleepRequests: 0.75, concurrentFragments: 2,
+      abortOnUnavailableFragments: true,
+      matchFilters: '!is_live',
+      newline: true, progress: true, progressDelta: 1,
+      progressTemplate: 'download:LENYT_PROGRESS=%(progress._percent_str)s',
+      print: ['after_move:LENYT_TITLE=%(title)j', 'after_move:LENYT_FILE=%(filepath)j'],
+      ...(video ? { mergeOutputFormat: 'mp4' } : {}),
+    };
+    const child = youtubeDlExec(`https://www.youtube.com/watch?v=${this.extractVideoId(url)}`, options, {
+      signal,
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      windowsHide: true,
+    });
+    let pending = '';
+    child.stdout?.on('data', (data: Buffer) => {
+      pending += data.toString();
+      const lines = pending.split(/\r?\n/);
+      pending = lines.pop() || '';
+      for (const line of lines) {
+        const percentage = line.match(/LENYT_PROGRESS=\s*([\d.]+)%/);
+        if (percentage) progress?.(Number(percentage[1]));
+      }
+    });
+    try {
+      const result = await child;
+      return result.stdout || '';
+    } catch (error: any) {
+      // tinyspawn's message contains the command, whereas stderr contains the
+      // actual YouTube failure needed by the shared retry policy.
+      if (error.stderr) error.message = error.stderr;
+      throw error;
     }
-    throw lastError;
+  }
+
+  async prepareMedia(url: string, kind: MediaKind, directory: string, quality = '1080p', signal?: AbortSignal, progress?: (value: number) => void): Promise<MediaFile> {
+    const heights: Record<string, number> = { '2160p': 2160, '4k': 2160, '1440p': 1440, '1080p': 1080, '720p': 720, '480p': 480, '360p': 360, '240p': 240, '144p': 144 };
+    const height = heights[quality] || 1080;
+    const format = kind === 'audio' ? 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio'
+      : `bestvideo[height<=${height}]+bestaudio/best[height<=${height}]`;
+    const output = await this.download(url, path.join(directory, 'media.%(ext)s'), format, kind === 'video', signal, progress);
+    const encodedPath = output.match(/^LENYT_FILE=(.*)$/m)?.[1];
+    if (!encodedPath) throw new Error('Không tìm thấy file media đã tải');
+    const raw = JSON.parse(encodedPath);
+    if (typeof raw !== 'string' || path.dirname(path.resolve(raw)) !== path.resolve(directory)) throw new Error('Đường dẫn file tải không hợp lệ');
+    if (!fs.statSync(raw).size) throw new Error('File tải về rỗng');
+    let file = raw;
+    if (kind === 'video') {
+      file = await playableMp4(raw, path.join(directory, 'video.mp4'), ffmpegPath, signal);
+    } else {
+      const inspection = await execFileAsync(ffmpegPath, ['-hide_banner', '-nostdin', '-i', raw, '-map', '0:a:0', '-t', '1', '-f', 'null', '-'], {
+        signal, timeout: 30_000, maxBuffer: 1024 * 1024, windowsHide: true,
+      });
+      if (!/Audio:/.test(inspection.stderr)) throw new Error('File tải về không có audio hợp lệ');
+    }
+    return { file, title: this.titleFromDownload(output, this.extractVideoId(url)), extension: path.extname(file).slice(1) };
+  }
+
+  private titleFromDownload(output: string, fallback: string) {
+    const json = output.match(/^LENYT_TITLE=(.*)$/m)?.[1];
+    if (json) {
+      try {
+        const title = JSON.parse(json);
+        if (typeof title === 'string') return this.sanitizeFilename(title);
+      } catch { /* yt-dlp did not return a JSON title. */ }
+    }
+    return fallback;
   }
 
   private async title(url: string) {
@@ -430,34 +455,23 @@ export class YouTubeToolsService {
 
   async streamAudio(url: string, res: Response) {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lenyt-audio-'));
+    const controller = new AbortController();
+    res.once('close', () => controller.abort());
     try {
-      const title = await this.title(url);
-      await this.download(url, path.join(directory, 'audio.%(ext)s'), 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio');
-      const name = fs.readdirSync(directory).find(name => !name.endsWith('.part') && !name.endsWith('.ytdl'));
-      if (!name) throw new Error('Không tìm thấy file audio đã tải');
-      const extension = path.extname(name).slice(1);
+      const { file, title, extension } = await this.prepareMedia(url, 'audio', directory, undefined, controller.signal);
       // Keep the original codec/container when AAC is unavailable; do not reduce audio quality.
       const types: Record<string, string> = { m4a: 'audio/mp4', webm: 'audio/webm', opus: 'audio/ogg' };
-      this.sendFile(path.join(directory, name), `${title}.${extension}`, types[extension] || 'application/octet-stream', res, directory);
+      this.sendFile(file, `${title}.${extension}`, types[extension] || 'application/octet-stream', res, directory);
     } catch (error) { fs.rmSync(directory, { recursive: true, force: true }); throw error; }
   }
 
   async streamVideo(url: string, res: Response, quality = '1080p') {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lenyt-video-'));
+    const controller = new AbortController();
+    res.once('close', () => controller.abort());
     try {
-      const title = await this.title(url);
-      const heights: Record<string, number> = { '2160p': 2160, '4k': 2160, '1440p': 1440, '1080p': 1080, '720p': 720, '480p': 480, '360p': 360 };
-      const height = heights[quality];
-      const format = height ? `bestvideo[height<=${height}]+bestaudio/best[height<=${height}]` : 'bestvideo+bestaudio/best';
-      const raw = path.join(directory, 'raw.mp4');
-      const output = path.join(directory, 'video.mp4');
-      await this.download(url, raw, format, true);
-      await new Promise<void>((resolve, reject) => {
-        Ffmpeg(raw).videoCodec('libx264').audioCodec('aac')
-          .outputOptions(['-movflags +faststart', '-preset fast', '-crf 23', '-pix_fmt yuv420p'])
-          .save(output).on('end', () => resolve()).on('error', reject);
-      });
-      this.sendFile(output, `${title}.mp4`, 'video/mp4', res, directory);
+      const { file, title } = await this.prepareMedia(url, 'video', directory, quality, controller.signal);
+      this.sendFile(file, `${title}.mp4`, 'video/mp4', res, directory);
     } catch (error) { fs.rmSync(directory, { recursive: true, force: true }); throw error; }
   }
 

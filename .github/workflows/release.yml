@@ -1,0 +1,129 @@
+name: Release CrawlData
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+        env:
+          YOUTUBE_DL_SKIP_DOWNLOAD: 'true'
+      - run: node scripts/verify-release-tag.cjs
+      - run: npm run dist:win
+        env:
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+      - run: node scripts/verify-release-artifacts.cjs win
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: |
+            release/CrawlData-Setup-*.exe
+            release/CrawlData-Setup-*.exe.blockmap
+            release/latest.yml
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-15
+    outputs:
+      enabled: ${{ steps.signing.outputs.enabled }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+        env:
+          YOUTUBE_DL_SKIP_DOWNLOAD: 'true'
+      - run: node scripts/verify-release-tag.cjs
+      - name: Check macOS signing and notarization credentials
+        id: signing
+        env:
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if node scripts/verify-mac-signing.cjs; then
+            echo 'enabled=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+            echo 'macOS assets skipped until Apple signing secrets are configured.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Build signed and notarized macOS release
+        if: steps.signing.outputs.enabled == 'true'
+        run: |
+          npm run build
+          node scripts/prepare-yt-dlp.cjs mac
+          npx electron-builder --mac dmg zip --arm64 --publish never --config.mac.notarize=true
+          codesign --verify --deep --strict --verbose=2 release/mac-arm64/CrawlData.app
+          node scripts/verify-release-artifacts.cjs mac
+        env:
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - uses: actions/upload-artifact@v4
+        if: steps.signing.outputs.enabled == 'true'
+        with:
+          name: macos-release
+          path: |
+            release/CrawlData-*.dmg
+            release/CrawlData-*.dmg.blockmap
+            release/CrawlData-*-mac.zip
+            release/CrawlData-*-mac.zip.blockmap
+            release/latest-mac.yml
+          if-no-files-found: error
+
+  publish:
+    needs: windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-release
+          path: release-assets
+      - name: Create public GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" release-assets/* --title "CrawlData $GITHUB_REF_NAME" --generate-notes --verify-tag
+          fi
+
+  publish-macos:
+    needs: [macos, publish]
+    if: needs.macos.result == 'success' && needs.macos.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-release
+          path: release-assets
+      - name: Add signed macOS assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber

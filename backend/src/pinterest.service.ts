@@ -14,10 +14,11 @@ import * as ExcelJS from 'exceljs';
 import * as archiver from 'archiver';
 import Ffmpeg from 'fluent-ffmpeg';
 import { DATA_DIR } from './config';
+import { executablePath } from './binary-paths';
 
 try {
   const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
-  Ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+  Ffmpeg.setFfmpegPath(executablePath(ffmpegInstaller.path));
 } catch {
   console.warn('[Pinterest] @ffmpeg-installer/ffmpeg not found, using system ffmpeg');
 }

@@ -1,12 +1,6 @@
-import axios from 'axios';
+import api, { TIMEOUT_DOWNLOAD, TIMEOUT_SCAN } from '@/config/axios';
 
-const BASE_URL = import.meta.env.DEV
-  ? 'http://localhost:8695/api/v1/'
-  : import.meta.env.VITE_SERVER_LOCAL || 'http://localhost:8696/api/v1/';
-
-export const api = axios.create({
-  baseURL: BASE_URL,
-});
+export { api };
 
 
 
@@ -98,14 +92,14 @@ class YouTubeService {
   async getTranscripts(videoIds: string[]): Promise<TranscriptResponse[]> {
     const response = await api.post(`youtube/transcripts`, {
       videoIds
-    })
+    }, { timeout: TIMEOUT_SCAN })
     return response.data
   }
 
   async getUrlsAll(url: string): Promise<DataUrls[]> {
     const response = await api.post(`youtube/urls`, {
       url
-    })
+    }, { timeout: TIMEOUT_SCAN })
     return response.data.videos
   }
 
@@ -115,7 +109,8 @@ class YouTubeService {
         `youtube/audio`,
         { url },
         {
-          responseType: 'blob'
+          responseType: 'blob',
+          timeout: TIMEOUT_DOWNLOAD
         }
       )
 
@@ -225,7 +220,8 @@ class YouTubeService {
         `youtube/video`,
         { url, quality },
         {
-          responseType: 'blob'
+          responseType: 'blob',
+          timeout: TIMEOUT_DOWNLOAD
         }
       )
 

@@ -13,16 +13,19 @@ import * as archiver from 'archiver';
 import Ffmpeg from 'fluent-ffmpeg';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { pipeline } from 'stream/promises';
 import { DATA_DIR } from './config';
+import { executablePath } from './binary-paths';
+import { playableMp4 } from './video-file';
 
 const execFileAsync = promisify(execFile);
-const ytDlpPath: string = require('youtube-dl-exec').constants.YOUTUBE_DL_PATH;
-const ffmpegPath: string = require('@ffmpeg-installer/ffmpeg').path;
+const ytDlpPath: string = executablePath(require('youtube-dl-exec').constants.YOUTUBE_DL_PATH);
+const ffmpegPath: string = executablePath(require('@ffmpeg-installer/ffmpeg').path);
 
 // Try to set ffmpeg path
 try {
   const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
-  Ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+  Ffmpeg.setFfmpegPath(executablePath(ffmpegInstaller.path));
 } catch {
   console.warn('[Instagram] @ffmpeg-installer/ffmpeg not found, using system ffmpeg');
 }
@@ -514,13 +517,18 @@ class InstagramService {
 
   async downloadVideo(url: string, res: Response, sessionCookie = this.sessionCookie || undefined) {
     const shortcode = this.getShortcode(url);
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lenyt-ig-video-'));
     try {
       const data = await this.getInstagramData(url, sessionCookie);
       const videoMedia = data.media_details.find((m) => m.type === 'video');
       if (!videoMedia?.url) throw new Error('No video found in this Instagram post');
-      const response = await axios({ url: videoMedia.url, method: 'GET', responseType: 'stream', headers: this.getDownloadHeaders() });
-      this.pipeDownload(response.data, res, `instagram_${shortcode}.mp4`, 'video/mp4');
+      const source = path.join(directory, 'source');
+      const response = await axios({ url: videoMedia.url, method: 'GET', responseType: 'stream', timeout: 60_000, headers: this.getDownloadHeaders() });
+      await pipeline(response.data, fs.createWriteStream(source));
+      const video = await playableMp4(source, path.join(directory, 'video.mp4'), ffmpegPath);
+      this.sendLocalDownload(video, res, `instagram_${shortcode}.mp4`, 'video/mp4', directory);
     } catch (error) {
+      fs.rmSync(directory, { recursive: true, force: true });
       if (res.headersSent) throw error;
       await this.downloadWithYtDlp(url, 'video', res);
     }
@@ -581,23 +589,20 @@ class InstagramService {
     const mediaType = /instagram\.com\/p\//i.test(input) ? 'p' : /instagram\.com\/tv\//i.test(input) ? 'tv' : 'reel';
     const url = `https://www.instagram.com/${mediaType}/${shortcode}/`;
     const args = [
-      '--no-playlist', '--no-warnings', '--no-progress',
+      '--ignore-config', '--no-playlist', '--no-warnings', '--no-progress',
       '--socket-timeout', '20', '--retries', '1', '--ffmpeg-location', ffmpegPath,
       '-o', path.join(directory, 'media.%(ext)s'),
-      ...(kind === 'video' ? ['-f', 'bv*+ba/b', '--merge-output-format', 'mp4', '--recode-video', 'mp4'] : ['-f', 'bestaudio/best']),
+      ...(kind === 'video' ? ['-f', 'bv*+ba/b', '--merge-output-format', 'mp4'] : ['-f', 'bestaudio/best']),
       '--', url,
     ];
     try {
-      // macOS Python 3.14 can fail to load expat; prefer a working 3.11 when installed.
-      const candidates = process.platform === 'darwin'
-        ? ['/opt/homebrew/opt/python@3.11/bin/python3.11', '/usr/local/bin/python3.11']
-        : [];
-      const python = candidates.find((candidate) => fs.existsSync(candidate));
-      await execFileAsync(python || ytDlpPath, python ? [ytDlpPath, ...args] : args, { timeout: 180_000, maxBuffer: 1024 * 1024 });
+      await execFileAsync(ytDlpPath, args, { timeout: 180_000, maxBuffer: 1024 * 1024 });
       const source = fs.readdirSync(directory).find((name) => name.startsWith('media.') && !name.endsWith('.part') && !name.endsWith('.ytdl'));
       if (!source) throw new Error('yt-dlp không tạo được file media');
       let file = path.join(directory, source);
-      if (kind === 'audio') {
+      if (kind === 'video') {
+        file = await playableMp4(file, path.join(directory, 'video.mp4'), ffmpegPath);
+      } else {
         const output = path.join(directory, 'audio.mp3');
         await this.convertToMp3(file, output);
         file = output;

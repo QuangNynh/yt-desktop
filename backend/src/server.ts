@@ -4,11 +4,14 @@ import axios from 'axios';
 import { loadSettings } from './config';
 import { apiRouter } from './routes';
 import { instagramService } from './instagram.service';
+import { youtubeDownloads } from './youtube-downloads';
 
 export function createServer() {
   for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'FTP_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'ftp_proxy']) {
     delete process.env[key];
   }
+  process.env.NO_PROXY = '*';
+  process.env.no_proxy = '*';
   axios.defaults.proxy = false;
 
   const app = express();
@@ -16,6 +19,22 @@ export function createServer() {
   app.use(cors({ exposedHeaders: ['Content-Disposition', 'Content-Length'] }));
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+  // Filesystem destinations come from trusted Electron IPC, never from a web origin.
+  app.all('/api/v1/internal/youtube-downloads', (req, res) => {
+    const remote = req.socket.remoteAddress;
+    if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remote || '') || req.headers.origin) return res.status(403).json({ success: false });
+    try {
+      if (req.method === 'GET') return res.json(youtubeDownloads.snapshot());
+      if (req.method !== 'POST') return res.sendStatus(405);
+      const { action, id, ...input } = req.body || {};
+      if (action === 'create') return res.json(youtubeDownloads.add(input));
+      if (action === 'clear-history') return res.json(youtubeDownloads.clearHistory(input.kind));
+      return res.json(youtubeDownloads.control(id, action));
+    } catch (error) {
+      return res.status(400).json({ success: false, message: error instanceof Error ? error.message : String(error) });
+    }
+  });
 
   app.post('/api/v1/internal/instagram-session', (req, res) => {
     const remote = req.socket.remoteAddress;
@@ -58,27 +77,29 @@ export function createServer() {
   return app;
 }
 
-export function startServer(port?: number) {
+export function startServer(port?: number): Promise<import('http').Server> {
   const settings = loadSettings();
   const listenPort = port || Number(process.env.PORT) || settings.port || 8696;
   const app = createServer();
-
-  const server = app.listen(listenPort, () => {
-    console.log(`[Backend] YouTube Scheduler Server running on http://localhost:${listenPort}/api/v1`);
+  return new Promise((resolve, reject) => {
+    const server = app.listen(listenPort, '127.0.0.1');
+    server.once('close', () => youtubeDownloads.shutdown());
+    server.once('listening', () => {
+      console.log(`[Backend] Server running on http://127.0.0.1:${listenPort}/api/v1`);
+      resolve(server);
+    });
+    server.once('error', reject);
   });
-
-  server.on('error', (err: any) => {
-    if (err.code === 'EADDRINUSE') {
-      console.warn(`[Backend] Port ${listenPort} is already in use. Assuming existing backend server is running.`);
-    } else {
-      console.error(`[Backend] Server error:`, err);
-    }
-  });
-
-  return server;
 }
 
 // Nếu chạy trực tiếp từ CLI (tsx watch backend/src/server.ts)
 if (require.main === module) {
-  startServer();
+  void startServer().then(server => {
+    const shutdown = () => { youtubeDownloads.shutdown(); server.close(); };
+    process.once('SIGTERM', shutdown);
+    process.once('SIGINT', shutdown);
+  }).catch(error => {
+    console.error('[Backend] Failed to start:', error);
+    process.exitCode = 1;
+  });
 }
