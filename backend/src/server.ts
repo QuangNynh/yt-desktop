@@ -5,6 +5,12 @@ import { loadSettings } from './config';
 import { apiRouter } from './routes';
 import { instagramService } from './instagram.service';
 import { youtubeDownloads } from './youtube-downloads';
+import { getAiGateway, shutdownAiGateway } from './ai-instance';
+import { mountAiRoutes } from './ai-routes';
+import { getScriptConverter, shutdownScriptConverter } from './script-converter-instance';
+import { mountScriptConverterRoutes } from './script-converter-routes';
+import { getMediaJobs, shutdownMediaJobs } from './media-instance';
+import { mountMediaRoutes } from './media-routes';
 
 export function createServer() {
   for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'FTP_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'ftp_proxy']) {
@@ -19,6 +25,10 @@ export function createServer() {
   app.use(cors({ exposedHeaders: ['Content-Disposition', 'Content-Length'] }));
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+  mountAiRoutes(app, getAiGateway);
+  mountScriptConverterRoutes(app, getScriptConverter);
+  mountMediaRoutes(app, getMediaJobs);
 
   // Filesystem destinations come from trusted Electron IPC, never from a web origin.
   app.all('/api/v1/internal/youtube-downloads', (req, res) => {
@@ -83,7 +93,7 @@ export function startServer(port?: number): Promise<import('http').Server> {
   const app = createServer();
   return new Promise((resolve, reject) => {
     const server = app.listen(listenPort, '127.0.0.1');
-    server.once('close', () => youtubeDownloads.shutdown());
+    server.once('close', () => { youtubeDownloads.shutdown(); shutdownScriptConverter(); shutdownAiGateway(); shutdownMediaJobs(); });
     server.once('listening', () => {
       console.log(`[Backend] Server running on http://127.0.0.1:${listenPort}/api/v1`);
       resolve(server);
@@ -95,7 +105,7 @@ export function startServer(port?: number): Promise<import('http').Server> {
 // Nếu chạy trực tiếp từ CLI (tsx watch backend/src/server.ts)
 if (require.main === module) {
   void startServer().then(server => {
-    const shutdown = () => { youtubeDownloads.shutdown(); server.close(); };
+    const shutdown = () => { youtubeDownloads.shutdown(); shutdownScriptConverter(); shutdownAiGateway(); shutdownMediaJobs(); server.close(); };
     process.once('SIGTERM', shutdown);
     process.once('SIGINT', shutdown);
   }).catch(error => {

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Youtube, Instagram, ChevronLeft, ChevronRight, Settings, X } from 'lucide-react';
+import { Youtube, Instagram, ChevronLeft, ChevronRight, Settings, X, Rocket, FileText, Subtitles, FileAudio, Scissors } from 'lucide-react';
 import { Button } from '../ui/button';
 
 const TikTokIcon = (props: React.SVGProps<SVGSVGElement>) => (
@@ -46,6 +46,27 @@ const navItems: NavItem[] = [
     path: '/pinterest',
     icon: <PinterestIcon className="h-5 w-5" />,
     color: 'text-red-600',
+  },
+  {
+    label: 'AI / Antigravity',
+    path: '/ai',
+    icon: <Rocket className="h-5 w-5" />,
+    color: 'text-amber-500',
+  },
+  {
+    label: 'AI Script Converter',
+    path: '/script-converter',
+    icon: <FileText className="h-5 w-5" />,
+    color: 'text-violet-500',
+  },
+  {
+    label: 'Convert Audio to SRT', path: '/audio-to-srt', icon: <Subtitles className="h-5 w-5" />, color: 'text-cyan-500',
+  },
+  {
+    label: 'Audio to Script', path: '/audio-to-script', icon: <FileAudio className="h-5 w-5" />, color: 'text-blue-500',
+  },
+  {
+    label: 'Extract Audio', path: '/extract-audio', icon: <Scissors className="h-5 w-5" />, color: 'text-emerald-500',
   },
   {
     label: 'Settings / About',

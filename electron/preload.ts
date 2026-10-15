@@ -1,4 +1,19 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
+
+contextBridge.exposeInMainWorld('desktopMedia', {
+  select: (tool: string) => ipcRenderer.invoke('media:select', tool),
+  files: (files: File[], tool: string) => ipcRenderer.invoke('media:files', files.map(file => webUtils.getPathForFile(file)), tool),
+  request: (request: unknown) => ipcRenderer.invoke('media:request', request),
+});
+
+contextBridge.exposeInMainWorld('desktopAi', {
+  request: (request: unknown) => ipcRenderer.invoke('ai:request', request),
+});
+
+contextBridge.exposeInMainWorld('desktopScripts', {
+  request: (request: unknown) => ipcRenderer.invoke('scripts:request', request),
+  copy: (text: string) => ipcRenderer.invoke('scripts:copy', text),
+});
 
 contextBridge.exposeInMainWorld('instagramDesktop', {
   status: () => ipcRenderer.invoke('instagram:status') as Promise<{ connected: boolean }>,

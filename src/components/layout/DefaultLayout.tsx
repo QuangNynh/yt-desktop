@@ -9,6 +9,20 @@ export function DefaultLayout() {
   const { pathname } = useLocation();
   const isYouTube = pathname === '/' || pathname === '/youtube-tools';
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+    try {
+      const saved = localStorage.getItem('theme');
+      if (saved === 'dark' || saved === 'light') {
+        const root = document.documentElement;
+        if (saved === 'dark') {
+          root.classList.add('dark');
+        } else {
+          root.classList.remove('dark');
+        }
+        return saved;
+      }
+    } catch {
+      // ignore
+    }
     const root = document.documentElement;
     return root.classList.contains('dark') ? 'dark' : 'light';
   });
@@ -48,6 +62,11 @@ export function DefaultLayout() {
         root.classList.add('dark');
       } else {
         root.classList.remove('dark');
+      }
+      try {
+        localStorage.setItem('theme', next);
+      } catch {
+        // ignore
       }
       return next;
     });
